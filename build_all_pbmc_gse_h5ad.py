@@ -5,6 +5,8 @@ import shutil
 from pathlib import Path
 from tempfile import TemporaryDirectory
 
+import anndata as ad
+import h5py
 import pandas as pd
 
 from pbmc_gse_datasets import (
@@ -131,37 +133,60 @@ def write_dataset(adata, cohort, protocol, cell_input, output_name, path):
     """Save raw counts, source cell identifiers, cohort fields, and the gene-symbol index."""
     # Mark the beginning of gene harmonization because reference download/mapping is a separate slow or failure-prone stage from raw-count parsing.
     progress('  Preparing gene symbols...')
-    # Convert heterogeneous deposited feature identifiers to the standardized gene-symbol index.
-    adata = standardize_genes(adata)
+    # Keep the large Gustafson count matrix on disk while loading only its observation and feature tables.
+    on_disk = isinstance(adata, Path)
+    if on_disk:
+        source_path = adata
+        backed = ad.read_h5ad(source_path, backed='r')
+        n_obs, n_vars = backed.shape
+        obs = cell_metadata(backed.obs, cohort, protocol, cell_input)
+        var = backed.var.copy()
+        backed.file.close()
+        with h5py.File(source_path, 'r') as source:
+            average = source['X']['data'].shape[0] / n_obs if n_obs else 0.0
+    else:
+        # Convert heterogeneous deposited feature identifiers to the standardized gene-symbol index.
+        adata = standardize_genes(adata)
+        n_obs, n_vars = adata.shape
+        average = average_genes_per_cell(adata)
+        # Replace reader-specific observation metadata with the compact schema expected by downstream integration.
+        adata.obs = cell_metadata(adata.obs, cohort, protocol, cell_input)
+        # Remove study-specific `uns` payloads so arbitrary source metadata does not bloat or conflict across the standardized collection.
+        adata.uns.clear()
+        obs, var = adata.obs, adata.var
     # Log the post-harmonization feature count so unexpected gene loss is visible before serialization.
-    progress(f'  Found {adata.n_vars:,} genes.')
+    progress(f'  Found {n_vars:,} genes.')
     # Report a quick sparsity/QC statistic so an empty or badly parsed count matrix is obvious before it is saved.
-    progress(f'  Average genes per cell: {average_genes_per_cell(adata):,.1f}')
-    # Replace reader-specific observation metadata with the compact schema expected by downstream integration.
-    adata.obs = cell_metadata(adata.obs, cohort, protocol, cell_input)
-    # Remove study-specific `uns` payloads so arbitrary source metadata does not bloat or conflict across the standardized collection.
-    adata.uns.clear()
+    progress(f'  Average genes per cell: {average:,.1f}')
     # Store repeated labels as categories before saving, without AnnData's per-column messages.
     # Convert repeated strings to categoricals so H5AD storage is smaller without changing their values.
-    for frame in (adata.obs, adata.var):
+    for frame in (obs, var):
         # Convert only repeated string columns to categoricals, reducing H5AD size while leaving unique identifiers as ordinary strings.
         for column in frame.select_dtypes(include=['object', 'string']):
             # Convert a string column to categorical only when values repeat; unique IDs would not benefit from categorical storage.
             if frame[column].nunique() < len(frame):
                 # Convert only repeated string metadata to categorical storage; this reduces H5AD size without changing any label values.
                 frame[column] = frame[column].astype('category')
+    # Replace only metadata groups in the disk-backed Gustafson H5AD without loading or rewriting its count matrix.
+    if on_disk:
+        with h5py.File(source_path, 'r+') as store:
+            for key, value in [('obs', obs), ('var', var), ('uns', {})]:
+                if key in store:
+                    del store[key]
+                ad.io.write_elem(store, key, value)
     # Create the accession output directory lazily only when an H5AD is actually being written.
     path.parent.mkdir(parents=True, exist_ok=True)
     # Write through a temporary filename so an interrupted write cannot be mistaken for a completed H5AD.
     partial = path.with_suffix('.partial.h5ad')
     # Log the final cell/gene dimensions immediately before HDF5 serialization, separating write failures from earlier parsing failures.
-    progress(
-        f'  Saving {output_name}: {adata.n_obs:,} cells, {adata.n_vars:,} genes...'
-    )
+    progress(f'  Saving {output_name}: {n_obs:,} cells, {n_vars:,} genes...')
     # Protect the temporary-file write so cleanup executes even if HDF5 serialization raises.
     try:
-        # Serialize the standardized AnnData to the temporary path with gzip compression before exposing the final filename.
-        adata.write_h5ad(partial, compression='gzip', compression_opts=4)
+        # Move the completed disk-backed H5AD directly; ordinary cohorts retain the existing compressed write path.
+        if on_disk:
+            shutil.move(source_path, partial)
+        else:
+            adata.write_h5ad(partial, compression='gzip', compression_opts=4)
         # Atomically promote the completed temporary H5AD so the final path is a reliable completion signal.
         partial.replace(path)
     finally:
@@ -267,39 +292,28 @@ def run(debug=False):
                 outputs = build_gse(
                     accession, Path(temporary), False, cohort_name, debug=debug
                 )
-            # Treat an empty reader result as a real failure instead of silently considering the cohort complete.
-            if not outputs:
-                # Force an empty reader result into the failure path because a supported accession should never silently produce nothing.
-                raise ValueError('No datasets returned')
-            # A reader may return more than one assay-specific AnnData object; write each output independently.
-            for output_name, adata in outputs:
-                # Resolve the path per returned assay so existing and missing outputs from one accession can be handled independently.
-                path = output_dir / accession / f'{output_name}.h5ad'
-                # Within a multi-output cohort, preserve any completed assay and build only the missing one.
-                if path.is_file():
-                    # Log output reuse so restart behavior is distinguishable from a cohort that was never processed.
-                    progress(f'  {output_name} already exists; skipped')
-                    # Advance to the next cohort/output immediately after a deliberate skip so no build/write code executes for this item.
-                    continue
-                # Isolate failures at cohort/output granularity so the outer build continues and records exactly what failed.
-                try:
-                    # Resolve Protocol and Cell Input from the sample sheets immediately before writing this specific output.
-                    protocol, cell_input = sample_metadata(
-                        sample_df, cohort_name, output_name
-                    )
-                    # Write this assay only after its sample-derived technical metadata has been resolved.
-                    write_dataset(
-                        adata, cohort, protocol, cell_input, output_name, path
-                    )
-                    # Update the saved/skipped counter immediately after that outcome so the final summary reflects actual work performed.
-                    saved_count += 1
-                except Exception as error:
-                    # Log an assay-specific serialization failure while allowing other outputs from the same accession or later cohorts to continue.
-                    progress(
-                        f'  Could not save {output_name}: {type(error).__name__}: {error}'
-                    )
-                    # Record this exact failed accession/output so the end-of-run failure list can be used for a targeted rerun.
-                    failed.append(f'{accession}/{output_name}')
+                # Keep disk-backed outputs inside the temporary workspace until they have been moved to their final location.
+                if not outputs:
+                    raise ValueError('No datasets returned')
+                # A reader may return more than one assay-specific AnnData object; write each output independently.
+                for output_name, adata in outputs:
+                    path = output_dir / accession / f'{output_name}.h5ad'
+                    if path.is_file():
+                        progress(f'  {output_name} already exists; skipped')
+                        continue
+                    try:
+                        protocol, cell_input = sample_metadata(
+                            sample_df, cohort_name, output_name
+                        )
+                        write_dataset(
+                            adata, cohort, protocol, cell_input, output_name, path
+                        )
+                        saved_count += 1
+                    except Exception as error:
+                        progress(
+                            f'  Could not save {output_name}: {type(error).__name__}: {error}'
+                        )
+                        failed.append(f'{accession}/{output_name}')
         except Exception as error:
             # Log an accession-level reader failure while preserving already completed cohorts and continuing the batch.
             progress(f'  Failed to build {accession}: {type(error).__name__}: {error}')

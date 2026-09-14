@@ -23,10 +23,11 @@ import anndata as ad
 import h5py
 import numpy as np
 import pandas as pd
+from anndata.experimental import concat_on_disk
 from scipy import sparse
 from scipy.io import mmread
 
-#TODO: 
+# TODO:
 """
 [19/31] Li.2021.Heme (non-T) (GSE172158 / PRJNA722255) - skipped: no reader for this source
 [20/31] Bei.2023.Heme (T) (GSE203663 / PRJNA841847) - skipped: no reader for this source
@@ -36,66 +37,64 @@ ad.settings.allow_write_nullable_strings = True
 
 
 # Send the same progress text to stdout and log.txt so interactive and batch runs report identical status.
-def progress(message, end="\n"):
+def progress(message):
     """Print one plain message and append the same text to log.txt."""
     # Flush console output immediately so interactive terminals and batch logs show progress without buffering delays.
-    print(message, end=end, flush=True)
+    print(message, flush=True)
     # Open the log in append mode per message so console and file logging stay synchronized without a long-lived global handle.
-    with open("log.txt", "a", encoding="utf-8") as log:
+    with open('log.txt', 'a', encoding='utf-8') as log:
         # Append the same progress message to `log.txt` so failures can be reconstructed after the terminal session ends.
-        log.write(message + "\n")
+        log.write(message + '\n')
 
 
 # Whitelist only GEO accessions with explicit reader branches so unsupported series are never parsed accidentally.
 PUBLIC_BUILDABLE_GSES = (
-    "GSE98638",
-    "GSE99254",
-    "GSE108989",
-    "GSE140228",
-    "GSE114727",
-    "GSE155698",
-    "GSE162025",
-    "GSE145281",
-    "GSE267718",
-    "GSE123139",
-    "GSE181061",
-    "GSE139324",
-    "GSE314004",
-    "GSE253173",
-    "GSE264489",
-    "GSE341191",
-    "GSE234129",
-    "GSE238130",
-    "GSE197543",
-    "GSE217845",
-    "GSE271896",
-    "GSE275067",
-    "GSE196735",
-    "GSE214283",
+    'GSE98638',
+    'GSE99254',
+    'GSE108989',
+    'GSE140228',
+    'GSE114727',
+    'GSE155698',
+    'GSE162025',
+    'GSE145281',
+    'GSE267718',
+    'GSE123139',
+    'GSE181061',
+    'GSE139324',
+    'GSE314004',
+    'GSE253173',
+    'GSE264489',
+    'GSE341191',
+    'GSE234129',
+    'GSE238130',
+    'GSE197543',
+    'GSE217845',
+    'GSE271896',
+    'GSE275067',
+    'GSE196735',
+    'GSE214283',
 )
 
 # Normalize known source donor-name variants to one biological donor key so author naming inconsistencies do not split a patient.
 DONOR_ALIASES = {
-    "20170706": "P0706",
-    "20171120": "P1120",
-    "20171208": "P1208",
-    "20171219": "P1219",
+    '20170706': 'P0706',
+    '20171120': 'P1120',
+    '20171208': 'P1208',
+    '20171219': 'P1219',
 }
 # Pin one GENCODE release for Ensembl-to-symbol mapping so gene harmonization is reproducible.
-GENCODE_V35_URL = "https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_35/gencode.v35.annotation.gtf.gz"
+GENCODE_V35_URL = 'https://ftp.ebi.ac.uk/pub/databases/gencode/Gencode_human/release_35/gencode.v35.annotation.gtf.gz'
 
 
 # Register the two non-GEO sources handled by dedicated CELLxGENE and Zenodo readers.
-EXTERNAL_SOURCES = ("c838aec3-03ef-4398-b882-0e3912abfff0", "Zenodo10546916")
-
-
+EXTERNAL_SOURCES = ('c838aec3-03ef-4398-b882-0e3912abfff0', 'Zenodo10546916')
 
 
 # Construct the deterministic GEO Series FTP path for one metadata or supplementary file.
-def _series_url(accession: str, filename: str, section: str = "suppl") -> str:
+def _series_url(accession: str, filename: str, section: str = 'suppl') -> str:
     """Construct an NCBI GEO Series URL for one metadata or supplementary file."""
     # Return the NCBI GEO series URL using the accession-prefix `nnn` directory convention.
-    return f"https://ftp.ncbi.nlm.nih.gov/geo/series/{accession[:-3]}nnn/{accession}/{section}/{filename}"
+    return f'https://ftp.ncbi.nlm.nih.gov/geo/series/{accession[:-3]}nnn/{accession}/{section}/{filename}'
 
 
 # Construct the corresponding GEO Sample FTP path for a GSM-level supplementary file.
@@ -103,7 +102,7 @@ def _sample_url(gsm: str, filename: str) -> str:
     """Construct an NCBI GEO Sample URL for one supplementary file."""
     # Return the NCBI GEO sample URL using the GSM-prefix `nnn` directory convention.
     return (
-        f"https://ftp.ncbi.nlm.nih.gov/geo/samples/{gsm[:-3]}nnn/{gsm}/suppl/{filename}"
+        f'https://ftp.ncbi.nlm.nih.gov/geo/samples/{gsm[:-3]}nnn/{gsm}/suppl/{filename}'
     )
 
 
@@ -119,7 +118,7 @@ def _download(url: str, destination: Path) -> Path:
         return destination
 
     # Keep incomplete transfers visibly separate from valid source files.
-    partial = destination.with_suffix(destination.suffix + ".part")
+    partial = destination.with_suffix(destination.suffix + '.part')
     # Limit downloads to five attempts, giving transient repository/network failures a chance to recover without retrying forever.
     for attempt in range(1, 6):
         # Remove this temporary/raw file after its information has been safely transferred into memory or final output.
@@ -127,12 +126,18 @@ def _download(url: str, destination: Path) -> Path:
         # Send an explicit User-Agent because some public repositories reject default anonymous Python clients.
         request = urllib.request.Request(
             url,
-            headers={"User-Agent": "pbmc-raw-count-audit/1.0", "Accept-Encoding": "identity"},
+            headers={
+                'User-Agent': 'pbmc-raw-count-audit/1.0',
+                'Accept-Encoding': 'identity',
+            },
         )
         # Isolate each network attempt so transient failures trigger retry/backoff without promoting a partial file.
         try:
             # Stream the remote response in chunks so large downloads use constant memory.
-            with urllib.request.urlopen(request, timeout=180) as response, partial.open("wb") as output:
+            with (
+                urllib.request.urlopen(request, timeout=180) as response,
+                partial.open('wb') as output,
+            ):
                 # Read the network response in 1 MB chunks so transfer memory use stays essentially constant regardless of file size.
                 while chunk := response.read(1024 * 1024):
                     # Write each network chunk immediately so download memory stays constant even for very large source files.
@@ -140,12 +145,18 @@ def _download(url: str, destination: Path) -> Path:
             # Reject zero-byte transfers before promotion because a nominally successful HTTP request with no content is not a valid input.
             if not partial.stat().st_size:
                 # Surface invalid/failed transfers immediately so a corrupt cache file is never used as dataset input.
-                raise ConnectionError(f"Empty download: {destination.name}")
+                raise ConnectionError(f'Empty download: {destination.name}')
             # Promote the completed download atomically so the final cache path always represents a complete file.
             partial.replace(destination)
             # Return only a verified final cache path; callers never receive the temporary `.part` path.
             return destination
-        except (ConnectionError, TimeoutError, URLError, HTTPException, SSLError) as error:
+        except (
+            ConnectionError,
+            TimeoutError,
+            URLError,
+            HTTPException,
+            SSLError,
+        ) as error:
             # Inspect HTTP status codes separately because only a subset represents transient failures worth retrying.
             if isinstance(error, HTTPError):
                 # Close the HTTP error response before retry logic continues, releasing the underlying network resource promptly.
@@ -159,9 +170,9 @@ def _download(url: str, destination: Path) -> Path:
                 # Surface invalid/failed transfers immediately so a corrupt cache file is never used as dataset input.
                 raise
             # Back off exponentially between failed download attempts so temporary repository throttling/outages are not hammered continuously.
-            sleep(2 ** attempt)
+            sleep(2**attempt)
     # Surface invalid/failed transfers immediately so a corrupt cache file is never used as dataset input.
-    raise RuntimeError(f"Could not download {destination.name}")
+    raise RuntimeError(f'Could not download {destination.name}')
 
 
 # Download a fixed set of series-level inputs while reporting simple file-count progress.
@@ -172,7 +183,7 @@ def _series_files(raw: Path, accession: str, filenames: Sequence[str]) -> list[P
     # Download audited files sequentially so progress is deterministic and network/disk pressure remains bounded.
     for number, filename in enumerate(filenames, 1):
         # Expose per-input progress because several cohorts contain dozens or hundreds of source files and would otherwise appear stalled.
-        progress(f"  Downloading input {number}/{len(filenames)}", end="\r")
+        progress(f'  Downloading input {number}/{len(filenames)}')
         # Preserve downloaded file order so later reader logic can pair or select inputs deterministically.
         paths.append(_download(_series_url(accession, filename), raw / filename))
     # Return downloaded paths in requested order so positional readers remain deterministic.
@@ -190,9 +201,9 @@ def _sample_file(raw: Path, gsm: str, filename: str) -> Path:
 def _soft(raw: Path, accession: str) -> Path:
     """Download one GEO family SOFT file used for sample-level selection."""
     # Derive the GEO family SOFT filename from the accession; this metadata drives sample-level inclusion and supplementary-file discovery.
-    filename = f"{accession}_family.soft.gz"
+    filename = f'{accession}_family.soft.gz'
     # Delegate cache/retry/atomic-transfer behavior to the shared downloader and return the completed local path.
-    return _download(_series_url(accession, filename, "soft"), raw / filename)
+    return _download(_series_url(accession, filename, 'soft'), raw / filename)
 
 
 # Parse only the GEO SOFT fields required for sample selection and supplementary-file discovery.
@@ -203,39 +214,39 @@ def _soft_samples(path: Path) -> list[dict]:
     # Track the SOFT sample block currently being parsed until the next `^SAMPLE` marker begins a new record.
     current: dict | None = None
     # Stream-decompress GEO SOFT metadata line-by-line rather than loading the full file.
-    with gzip.open(path, "rt", encoding="utf-8", errors="replace") as handle:
+    with gzip.open(path, 'rt', encoding='utf-8', errors='replace') as handle:
         # Stream-parse SOFT line-by-line because only a small subset of fields is needed from potentially large metadata files.
         for line in handle:
             # Strip only the newline terminator; all other GEO metadata text is preserved for exact parsing.
-            line = line.rstrip("\n")
+            line = line.rstrip('\n')
             # Use the GEO `^SAMPLE` marker as the authoritative boundary between GSM records.
-            if line.startswith("^SAMPLE = "):
+            if line.startswith('^SAMPLE = '):
                 # Flush the previous sample record before starting/finalizing another one so no GSM metadata is lost.
                 if current:
                     # Commit the completed GEO sample record before starting the next SOFT sample block.
                     records.append(current)
                 # Track the SOFT sample block currently being parsed until the next `^SAMPLE` marker begins a new record.
-                current = {"gsm": line.split("=", 1)[1].strip(), "supplementary": []}
+                current = {'gsm': line.split('=', 1)[1].strip(), 'supplementary': []}
             # Capture each GEO sample title because several cohort readers recover donor, tissue, plate, or timepoint identity from this field.
-            elif current is not None and line.startswith("!Sample_title = "):
+            elif current is not None and line.startswith('!Sample_title = '):
                 # Store the GEO sample title because several cohorts encode donor, tissue, or treatment status only in that title.
-                current["title"] = line.split("=", 1)[1].strip()
+                current['title'] = line.split('=', 1)[1].strip()
             # Parse GEO `Sample_characteristics_ch1` fields because tissue, treatment, donor, and timing eligibility are often stored only in these key/value records.
             elif current is not None and line.startswith(
-                "!Sample_characteristics_ch1 = "
+                '!Sample_characteristics_ch1 = '
             ):
                 # Extract the author-provided characteristics text before splitting it into a normalized metadata key/value pair.
-                item = line.split("=", 1)[1].strip()
+                item = line.split('=', 1)[1].strip()
                 # Only split characteristics that actually contain a key/value separator; malformed free text is left unparsed.
-                if ": " in item:
+                if ': ' in item:
                     # Split a characteristics record only at the first `: ` so values containing additional colons are preserved intact.
-                    key, value = item.split(": ", 1)
+                    key, value = item.split(': ', 1)
                     # Normalize characteristic keys to lowercase while preserving their values, making cohort filters robust to capitalization differences.
                     current[key.strip().lower()] = value.strip()
             # Collect supplementary-file URLs only while inside a valid GSM record; file-type filtering happens later after biological eligibility is known.
-            elif current is not None and line.startswith("!Sample_supplementary_file"):
+            elif current is not None and line.startswith('!Sample_supplementary_file'):
                 # Preserve every supplementary URL linked to this GSM; the cohort-specific filename predicate later decides which files are valid count inputs.
-                current["supplementary"].append(line.split("=", 1)[1].strip())
+                current['supplementary'].append(line.split('=', 1)[1].strip())
     # Flush the previous sample record before starting/finalizing another one so no GSM metadata is lost.
     if current:
         # Commit the completed GEO sample record before starting the next SOFT sample block.
@@ -262,21 +273,21 @@ def _download_selected(
             # Skip directly to the next GEO record once this sample fails the biological eligibility predicate.
             continue
         # Inspect supplementary files only for eligible samples, then keep only accepted count/matrix file types.
-        for url in record["supplementary"]:
+        for url in record['supplementary']:
             # Reduce each supplementary URL to its deposited filename so the allowed-file predicate can reject derived/unrelated files.
-            filename = url.rsplit("/", 1)[-1]
+            filename = url.rsplit('/', 1)[-1]
             # Ignore GEO's `NONE` placeholder and require the filename to pass the accepted-input predicate before planning a download.
-            if url != "NONE" and allowed(filename):
+            if url != 'NONE' and allowed(filename):
                 # Place accepted inputs in the accession-local workspace so later reads and cleanup use deterministic paths.
                 path = raw / filename
                 # Add this supplementary file to the download plan only after both biological sample and file-type filters pass.
-                inputs.append((_sample_url(record["gsm"], filename), path))
+                inputs.append((_sample_url(record['gsm'], filename), path))
     # Allow the same selector to operate in planning-only mode when downloads should not be executed yet.
     if download:
         # Inspect supplementary files only for eligible samples, then keep only accepted count/matrix file types.
         for number, (url, path) in enumerate(inputs, 1):
             # Expose per-input progress because several cohorts contain dozens or hundreds of source files and would otherwise appear stalled.
-            progress(f"  Downloading input {number}/{len(inputs)}", end="\r")
+            progress(f'  Downloading input {number}/{len(inputs)}')
             # Use the shared downloader so retries, cache reuse, and `.part` safety behave identically for every reference/source file.
             _download(url, path)
     # Return local paths only for files that passed both biological and file-type filtering.
@@ -287,7 +298,7 @@ def _download_selected(
 def _table(path: Path) -> pd.DataFrame:
     """Read a headerless tab-separated barcode or feature file as strings."""
     # Read barcode/feature sidecars as strings so identifiers are never coerced or lose formatting.
-    return pd.read_csv(path, sep="\t", header=None, dtype=str, compression="infer")
+    return pd.read_csv(path, sep='\t', header=None, dtype=str, compression='infer')
 
 
 # Make duplicated source identifiers unique with deterministic suffixes while preserving original order.
@@ -302,7 +313,7 @@ def _unique(values: Sequence[str] | pd.Index, name: str | None = None) -> pd.Ind
         # Check the number of previous occurrences before deciding whether this identifier needs a `__dupN` suffix.
         seen = counts.get(value, 0)
         # Emit the source ID unchanged on first occurrence and append a deterministic suffix only for later duplicates.
-        result.append(value if seen == 0 else f"{value}__dup{seen}")
+        result.append(value if seen == 0 else f'{value}__dup{seen}')
         # Increment the occurrence counter after emitting the identifier so the next duplicate receives the correct suffix.
         counts[value] = seen + 1
     # Return a deterministic unique index while preserving original source order.
@@ -318,13 +329,13 @@ def _make_var(features: pd.DataFrame) -> pd.DataFrame:
     symbols = features.iloc[:, 1].astype(str) if features.shape[1] >= 2 else ids
     # Create a uniform feature table containing both readable symbol and original source ID before cross-study remapping.
     var = pd.DataFrame(
-        {"gene_symbol": symbols.to_numpy(), "original_gene_id": ids.to_numpy()},
-        index=_unique(ids, "feature_id")
+        {'gene_symbol': symbols.to_numpy(), 'original_gene_id': ids.to_numpy()},
+        index=_unique(ids, 'feature_id'),
     )
     # Preserve feature type only when the deposited sidecar actually provides that third column.
     if features.shape[1] >= 3:
         # Preserve the optional third 10x feature column when present so RNA can later be distinguished from protein/ADT or other modalities.
-        var["feature_type"] = features.iloc[:, 2].astype(str).to_numpy()
+        var['feature_type'] = features.iloc[:, 2].astype(str).to_numpy()
     # Return the standardized feature-provenance table consumed by the AnnData readers.
     return var
 
@@ -343,11 +354,11 @@ def _read_10x(
     # Build one standardized observation row per cell while retaining the source barcode, library, and donor.
     obs = pd.DataFrame(
         {
-            "cell_barcode": barcode_values,
-            "library_id": library,
-            "donor_id": donor,
+            'cell_barcode': barcode_values,
+            'library_id': library,
+            'donor_id': donor,
         },
-        index=pd.Index([f"{library}:{v}" for v in barcode_values], name="cell_id"),
+        index=pd.Index([f'{library}:{v}' for v in barcode_values], name='cell_id'),
     )
     # Return counts and aligned metadata together as one AnnData so row/column correspondence cannot be lost.
     return ad.AnnData(X=x.astype(np.int32), obs=obs, var=var)
@@ -363,11 +374,11 @@ def _tar_table(archive: tarfile.TarFile, member) -> pd.DataFrame:
         # Stop on missing/ambiguous archive structure because proceeding would misalign or omit required count components.
         raise FileNotFoundError(member.name)
     # Wrap only gzipped members in a decompressor; uncompressed members can be read directly.
-    binary = gzip.GzipFile(fileobj=raw) if member.name.endswith(".gz") else raw
+    binary = gzip.GzipFile(fileobj=raw) if member.name.endswith('.gz') else raw
     # Decode the streamed archive member as UTF-8 text only for the duration of pandas parsing, leaving no extracted copy on disk.
-    with io.TextIOWrapper(binary, encoding="utf-8") as handle:
+    with io.TextIOWrapper(binary, encoding='utf-8') as handle:
         # Return the archive member as a string DataFrame without extracting it to a permanent file.
-        return pd.read_csv(handle, sep="\t", header=None, dtype=str)
+        return pd.read_csv(handle, sep='\t', header=None, dtype=str)
 
 
 # Resolve one required file inside variably structured 10x tar archives by accepted filename endings.
@@ -386,23 +397,23 @@ def _tar_member(archive: tarfile.TarFile, endings: Sequence[str]):
         # Reject ambiguous archive matches instead of arbitrarily pairing the wrong matrix/barcode/features.
         if len(matches) > 1:
             # Stop on missing/ambiguous archive structure because proceeding would misalign or omit required count components.
-            raise FileNotFoundError(f"Multiple archive members end in {ending}")
+            raise FileNotFoundError(f'Multiple archive members end in {ending}')
     # Stop on missing/ambiguous archive structure because proceeding would misalign or omit required count components.
-    raise FileNotFoundError(f"No archive member ends in {tuple(endings)}")
+    raise FileNotFoundError(f'No archive member ends in {tuple(endings)}')
 
 
 # Read a tarred 10x directory directly from the archive instead of permanently unpacking the full archive.
 def _read_10x_archive(path: Path, library: str, donor: str) -> ad.AnnData:
     """Read a 10x matrix, barcode table, and feature table directly from one tar.gz archive."""
     # Scope archive access tightly so handles close promptly and no full unpacked copy persists.
-    with tarfile.open(path, "r:gz") as archive:
+    with tarfile.open(path, 'r:gz') as archive:
         # Locate the 10x matrix independently of archive directory layout.
-        matrix = _tar_member(archive, ("matrix.mtx.gz", "matrix.mtx"))
+        matrix = _tar_member(archive, ('matrix.mtx.gz', 'matrix.mtx'))
         # Locate the barcode table independently while requiring one unambiguous match.
-        barcodes = _tar_member(archive, ("barcodes.tsv.gz", "barcodes.tsv"))
+        barcodes = _tar_member(archive, ('barcodes.tsv.gz', 'barcodes.tsv'))
         # Accept modern `features.tsv` or legacy `genes.tsv`, both of which appear in public 10x archives.
         features = _tar_member(
-            archive, ("features.tsv.gz", "features.tsv", "genes.tsv.gz", "genes.tsv")
+            archive, ('features.tsv.gz', 'features.tsv', 'genes.tsv.gz', 'genes.tsv')
         )
         # Open only the matrix member; the archive is never permanently unpacked.
         raw = archive.extractfile(matrix)
@@ -411,7 +422,7 @@ def _read_10x_archive(path: Path, library: str, donor: str) -> ad.AnnData:
             # Stop on missing/ambiguous archive structure because proceeding would misalign or omit required count components.
             raise FileNotFoundError(matrix.name)
         # Decompress the matrix member only when its filename is gzipped, otherwise stream the raw member directly.
-        handle = gzip.GzipFile(fileobj=raw) if matrix.name.endswith(".gz") else raw
+        handle = gzip.GzipFile(fileobj=raw) if matrix.name.endswith('.gz') else raw
         # Close the streamed Matrix Market member immediately after sparse parsing before reading barcode/feature sidecars.
         with handle:
             # Transpose the streamed sparse matrix to cells×genes while keeping sparse storage.
@@ -423,11 +434,11 @@ def _read_10x_archive(path: Path, library: str, donor: str) -> ad.AnnData:
     # Construct cell metadata only after matrix, barcode, and feature alignment is established.
     obs = pd.DataFrame(
         {
-            "cell_barcode": barcode_values,
-            "library_id": library,
-            "donor_id": donor,
+            'cell_barcode': barcode_values,
+            'library_id': library,
+            'donor_id': donor,
         },
-        index=pd.Index([f"{library}:{v}" for v in barcode_values], name="cell_id"),
+        index=pd.Index([f'{library}:{v}' for v in barcode_values], name='cell_id'),
     )
     # Return counts and aligned metadata together as one AnnData so row/column correspondence cannot be lost.
     return ad.AnnData(X=x.astype(np.int32), obs=obs, var=var)
@@ -442,10 +453,18 @@ def _gene_names(reference_dir=Path('data/reference')):
     # Cache the HGNC table locally so every cohort in a run uses one reference snapshot.
     path = reference_dir / 'hgnc_complete_set.txt'
     # Use the shared downloader so retries, cache reuse, and `.part` safety behave identically for every reference/source file.
-    _download('https://storage.googleapis.com/public-download-files/hgnc/tsv/tsv/hgnc_complete_set.txt', path)
+    _download(
+        'https://storage.googleapis.com/public-download-files/hgnc/tsv/tsv/hgnc_complete_set.txt',
+        path,
+    )
     # Load only approved symbols, Ensembl IDs, previous symbols, and aliases required for harmonization.
-    hgnc = pd.read_csv(path, sep='\t', dtype=str, keep_default_na=False,
-                       usecols=['symbol', 'ensembl_gene_id', 'prev_symbol', 'alias_symbol'])
+    hgnc = pd.read_csv(
+        path,
+        sep='\t',
+        dtype=str,
+        keep_default_na=False,
+        usecols=['symbol', 'ensembl_gene_id', 'prev_symbol', 'alias_symbol'],
+    )
     # Seed a case-insensitive approved-symbol lookup so already-correct symbols pass through unchanged.
     names = dict(zip(hgnc['symbol'].str.upper(), hgnc['symbol']))
     # Map aliases only when exactly one approved gene uses that alias.
@@ -461,7 +480,9 @@ def _gene_names(reference_dir=Path('data/reference')):
             # Add this unambiguous alias without overwriting an already approved mapping.
             names.setdefault(alias.upper(), rows['symbol'].iloc[0])
     # An Ensembl ID takes precedence over a deposited spelling of the gene name.
-    ensembl = {key: names.get(symbol.upper(), symbol) for key, symbol in gencode.items()}
+    ensembl = {
+        key: names.get(symbol.upper(), symbol) for key, symbol in gencode.items()
+    }
     # Upgrade each Ensembl mapping to a uniquely approved HGNC symbol when available.
     for identifier, rows in hgnc.groupby('ensembl_gene_id'):
         # Use an alias/Ensembl mapping only when it resolves uniquely to one approved HGNC symbol.
@@ -485,22 +506,35 @@ def standardize_genes(adata, report=True):
     # Reuse one cached HGNC/GENCODE lookup for every cohort so symbol normalization is consistent.
     names = _gene_names()
     # Prefer preserved source IDs; if absent, remove only the internal `__dupN` suffix added for AnnData uniqueness.
-    original = adata.var.get('original_gene_id',
-                             pd.Series(adata.var_names.str.replace(r'__dup\d+$', '', regex=True), index=adata.var_names))
+    original = adata.var.get(
+        'original_gene_id',
+        pd.Series(
+            adata.var_names.str.replace(r'__dup\d+$', '', regex=True),
+            index=adata.var_names,
+        ),
+    )
     # Keep deposited readable labels as a fallback mapping route when stable IDs are missing or unusable.
-    labels = adata.var.get('gene_symbol', pd.Series(adata.var_names, index=adata.var_names))
+    labels = adata.var.get(
+        'gene_symbol', pd.Series(adata.var_names, index=adata.var_names)
+    )
     # Resolve symbols in source-column order so mapping stays aligned with matrix columns.
     symbols = []
     # Resolve features one-by-one because studies differ in whether they supply Ensembl IDs, symbols, aliases, or combinations.
     for source_id, label in zip(original, labels):
         # Remove version suffixes only from Ensembl IDs, never symbols such as AL627309.1.
-        key = re.sub(r'^(ENS[GT]\d+)(?:\.\d+)?(?:_PAR_Y)?$', r'\1', str(source_id).strip()).upper()
+        key = re.sub(
+            r'^(ENS[GT]\d+)(?:\.\d+)?(?:_PAR_Y)?$', r'\1', str(source_id).strip()
+        ).upper()
         # Trim surrounding whitespace from the deposited label without otherwise altering its spelling.
         label = str(label).strip()
         # Prefer stable-ID mapping first, then approved/alias symbol mapping, reducing errors from ambiguous display names.
         symbol = names.get(key, names.get(label.upper(), ''))
         # Keep deposited gene names absent from the reference; never keep unresolved feature IDs.
-        if not symbol and re.fullmatch(r'[A-Za-z][A-Za-z0-9_.-]*', label) and not re.match(r'ENS[GT]\d|[NX][MR]_\d|(?:nan|none|null)$', label, re.I):
+        if (
+            not symbol
+            and re.fullmatch(r'[A-Za-z][A-Za-z0-9_.-]*', label)
+            and not re.match(r'ENS[GT]\d|[NX][MR]_\d|(?:nan|none|null)$', label, re.I)
+        ):
             # Prefer stable-ID mapping first, then approved/alias symbol mapping, reducing errors from ambiguous display names.
             symbol = label
         # Append the resolved symbol in source-feature order so the mapping stays aligned with matrix columns.
@@ -514,7 +548,7 @@ def standardize_genes(adata, report=True):
         # Emit mapping diagnostics only for top-level cohort processing; internal per-library standardization suppresses repetitive logs.
         if report:
             # Report unresolved feature loss so identifier-mapping failures cannot silently shrink the gene set.
-            progress(f"  Omitted {(~keep).sum():,} features without gene symbols.")
+            progress(f'  Omitted {(~keep).sum():,} features without gene symbols.')
     # Abort if no feature survives symbol resolution; saving a zero-gene H5AD would conceal a failed identifier-mapping step.
     if not keep.any():
         # Stop rather than saving an unusable matrix when feature harmonization cannot produce valid genes.
@@ -528,7 +562,9 @@ def standardize_genes(adata, report=True):
     # Apply the same unresolved-feature mask to the symbol index so feature labels remain aligned with the filtered matrix columns.
     symbols = symbols[keep]
     # Create final feature metadata indexed by resolved gene symbol while preserving all contributing source IDs.
-    var = pd.DataFrame({'original_gene_id': original.iloc[keep].astype(str).to_numpy()}, index=symbols)
+    var = pd.DataFrame(
+        {'original_gene_id': original.iloc[keep].astype(str).to_numpy()}, index=symbols
+    )
     # Aggregate duplicate final symbols only when multiple source columns resolve to the same gene.
     if not symbols.is_unique:
         # Count how many source columns collapse into each final symbol to expose unexpectedly large merges.
@@ -538,23 +574,30 @@ def standardize_genes(adata, report=True):
         # Each source column contributes once to its canonical gene's summed counts.
         codes, unique = pd.factorize(symbols, sort=False)
         # Promote small integers to avoid overflow when duplicate features are added.
-        dtype = np.promote_types(x.dtype, np.int32) if x.dtype.kind in 'biu' else x.dtype
+        dtype = (
+            np.promote_types(x.dtype, np.int32) if x.dtype.kind in 'biu' else x.dtype
+        )
         # Build a sparse one-hot feature→gene matrix so duplicate columns can be summed without densifying counts.
-        mapper = sparse.csr_matrix((np.ones(len(codes), dtype=dtype),
-                                    (np.arange(len(codes)), codes)),
-                                   shape=(len(codes), len(unique)))
+        mapper = sparse.csr_matrix(
+            (np.ones(len(codes), dtype=dtype), (np.arange(len(codes)), codes)),
+            shape=(len(codes), len(unique)),
+        )
         # Aggregate all source columns sharing a resolved symbol by sparse matrix multiplication, summing counts without densifying `X`.
         x = (x @ mapper).tocsr()
         # Merge original feature-ID provenance across duplicate-symbol groups so the single final gene column records every contributing source ID.
-        var = var.groupby(level=0, sort=False).agg(lambda values: ';'.join(dict.fromkeys(';'.join(values).split(';'))))
+        var = var.groupby(level=0, sort=False).agg(
+            lambda values: ';'.join(dict.fromkeys(';'.join(values).split(';')))
+        )
         # Emit mapping diagnostics only for top-level cohort processing; internal per-library standardization suppresses repetitive logs.
         if report:
             # Report the number of duplicate source columns collapsed after symbol mapping, confirming that aggregation occurred.
-            progress(f"  Summed {len(codes) - len(unique):,} duplicate gene columns.")
+            progress(f'  Summed {len(codes) - len(unique):,} duplicate gene columns.')
             # Format the largest duplicate-symbol merges into one compact diagnostic string.
-            top = ", ".join(f"{symbol}: {count} columns" for symbol, count in top_duplicates.items())
+            top = ', '.join(
+                f'{symbol}: {count} columns' for symbol, count in top_duplicates.items()
+            )
             # Show the largest many-to-one gene collapses so suspicious alias/feature mappings can be inspected quickly.
-            progress(f"  Top duplicate symbols: {top}")
+            progress(f'  Top duplicate symbols: {top}')
     # Return the same AnnData after replacing its feature axis with the harmonized gene-symbol representation.
     return ad.AnnData(X=x, obs=adata.obs.copy(), var=var, uns=adata.uns.copy())
 
@@ -578,7 +621,7 @@ def average_genes_per_cell(adata):
 def _concat(objects: list[ad.AnnData]) -> ad.AnnData:
     """Align libraries by canonical symbols before combining their cells."""
     # Log how many technical/sample-level AnnData objects are about to be merged so unexpectedly fragmented cohorts are obvious.
-    progress(f"  Combining {len(objects)} input matrices...")
+    progress(f'  Combining {len(objects)} input matrices...')
     # Standardize each input's genes before concatenation so the outer join operates on harmonized symbols rather than incompatible source IDs.
     for i, obj in enumerate(objects):
         # Harmonize each library's feature axis before comparing/concatenating them; repetitive per-library mapping diagnostics are suppressed here.
@@ -588,19 +631,27 @@ def _concat(objects: list[ad.AnnData]) -> ad.AnnData:
     # Use a fast sparse vertical stack when every input already has the same harmonized gene order; only invoke the slower outer gene union when feature axes differ.
     if all(objects[0].var_names.equals(obj.var_names) for obj in objects[1:]):
         # When every library already has identical harmonized gene order, stack cell rows directly with `sparse.vstack`; no feature reindexing is needed.
-        result = ad.AnnData(X=sparse.vstack([obj.X for obj in objects], format="csr"),
-                            obs=pd.concat([obj.obs for obj in objects]), var=objects[0].var.copy())
+        result = ad.AnnData(
+            X=sparse.vstack([obj.X for obj in objects], format='csr'),
+            obs=pd.concat([obj.obs for obj in objects]),
+            var=objects[0].var.copy(),
+        )
     else:
         # When harmonized feature axes differ, use an outer AnnData join so the cohort retains the union of genes and fills absent genes with zero.
-        result = ad.concat(objects, join="outer", merge="first", fill_value=0)
+        result = ad.concat(objects, join='outer', merge='first', fill_value=0)
     # Preserve every original ID when different libraries contribute the same gene.
     ids = pd.concat([obj.var['original_gene_id'] for obj in objects])
     # Merge original feature-ID provenance for genes shared across inputs so the final `var` records every contributing source ID.
-    ids = ids.str.split(';').explode().groupby(level=0, sort=False).agg(lambda values: ';'.join(dict.fromkeys(values)))
+    ids = (
+        ids.str.split(';')
+        .explode()
+        .groupby(level=0, sort=False)
+        .agg(lambda values: ';'.join(dict.fromkeys(values)))
+    )
     # Reindex the merged original-gene-ID provenance to the concatenated gene order so `var` stays exactly aligned with matrix columns.
     result.var = ids.reindex(result.var_names).to_frame()
     # Re-unique cell indices after concatenation because different libraries can reuse the same local barcode.
-    result.obs_names = _unique(result.obs_names, "cell_id")
+    result.obs_names = _unique(result.obs_names, 'cell_id')
     # Release the per-library AnnData list after concatenation; large cohort inputs should not remain referenced once the combined object exists.
     objects.clear()
     # Return one cohort-level object after stacking retained cells and reconciling gene sets.
@@ -613,19 +664,19 @@ def _gene_by_cell(
 ) -> tuple[sparse.csr_matrix, pd.DataFrame, pd.DataFrame]:
     """Read a gene-by-cell table whose header omits a placeholder above the gene-name column."""
     # Choose gzip or ordinary text reading from the actual filename so the same parser handles compressed and uncompressed tables.
-    opener = gzip.open if path.suffix == ".gz" else open
+    opener = gzip.open if path.suffix == '.gz' else open
     # Open only enough source text to inspect layout/header safely before the full pandas read.
-    with opener(path, "rt", encoding="utf-8", errors="replace") as handle:
+    with opener(path, 'rt', encoding='utf-8', errors='replace') as handle:
         # Read only the header and one data row first so delimiter/layout mistakes are caught before loading a potentially large gene-by-cell matrix.
         first, second = handle.readline().rstrip(), handle.readline().rstrip()
     # Handle variable-width whitespace matrices separately from delimiter-stable CSV/TSV files.
-    if delimiter == "whitespace":
+    if delimiter == 'whitespace':
         # Configure pandas from the observed whitespace layout when the source uses variable-width separators rather than a fixed delimiter.
         header, second_fields, sep, engine = (
             shlex.split(first),
             shlex.split(second),
-            r"\s+",
-            "python",
+            r'\s+',
+            'python',
         )
     else:
         # Parse the first line using the requested delimiter so cell columns are recovered exactly.
@@ -633,30 +684,33 @@ def _gene_by_cell(
         # Parse one data line with the same delimiter to validate that row width matches the header.
         second_fields = next(csv.reader([second], delimiter=delimiter))
         # Use the explicit CSV/TSV delimiter with pandas' C parser once the row-width check confirms a regular delimited table.
-        sep, engine = delimiter, "c"
+        sep, engine = delimiter, 'c'
     # Validate row width against the parsed header before loading the full table, catching delimiter/layout errors early.
     if len(second_fields) != len(header) + 1:
         # Reject a table whose parsed row width disagrees with the header because the delimiter/layout inference is wrong.
-        raise ValueError(f"Unexpected table layout in {path}")
+        raise ValueError(f'Unexpected table layout in {path}')
     # Load the table once after delimiter validation so identifiers and numeric values can be separated reliably.
     frame = pd.read_csv(
         path,
         sep=sep,
         header=None,
-        names=["feature_id", *header],
+        names=['feature_id', *header],
         skiprows=1,
         index_col=0,
-        compression="infer",
+        compression='infer',
         engine=engine,
     )
     # Strip source-added quote characters from feature IDs so otherwise valid identifiers can match HGNC/GENCODE reference keys.
-    frame.index = pd.Index(frame.index.astype(str).str.strip('"'), name="feature_id")
+    frame.index = pd.Index(frame.index.astype(str).str.strip('"'), name='feature_id')
     # Initialize cell metadata from deposited cell IDs; donor/library fields are added by the cohort-specific branch.
-    obs = pd.DataFrame(index=pd.Index(header, name="cell_barcode"))
+    obs = pd.DataFrame(index=pd.Index(header, name='cell_barcode'))
     # Build source feature provenance before returning the matrix.
     var = pd.DataFrame(
-        {"gene_symbol": frame.index.astype(str), "original_gene_id": frame.index.astype(str)},
-        index=_unique(frame.index, "feature_id"),
+        {
+            'gene_symbol': frame.index.astype(str),
+            'original_gene_id': frame.index.astype(str),
+        },
+        index=_unique(frame.index, 'feature_id'),
     )
     # Return sparse counts plus aligned cell and feature metadata for the cohort-specific caller to annotate further.
     return sparse.csr_matrix(frame.to_numpy(dtype=np.int32).T), obs, var
@@ -669,7 +723,10 @@ def _cell_by_gene(path: Path) -> tuple[sparse.csr_matrix, pd.DataFrame, pd.DataF
     columns = pd.read_csv(path, nrows=0).columns
     # Load the deposited cell×gene table in native orientation; no transpose is needed.
     frame = pd.read_csv(
-        path, index_col=0, compression="infer", dtype={c: np.float32 for c in columns[1:]}
+        path,
+        index_col=0,
+        compression='infer',
+        dtype={c: np.float32 for c in columns[1:]},
     ).fillna(0)
     # Recover the actual header so pandas' automatic .1 suffixes do not become gene names.
     opener = gzip.open if path.suffix == '.gz' else open
@@ -678,11 +735,14 @@ def _cell_by_gene(path: Path) -> tuple[sparse.csr_matrix, pd.DataFrame, pd.DataF
         # Replace pandas' provisional headers with the exact deposited feature names after removing the leading cell-ID column.
         frame.columns = next(csv.reader(handle))[1:]
     # Preserve row identifiers as source cell IDs before attaching cohort-specific donor/library metadata.
-    obs = pd.DataFrame(index=pd.Index(frame.index.astype(str), name="cell_barcode"))
+    obs = pd.DataFrame(index=pd.Index(frame.index.astype(str), name='cell_barcode'))
     # Use feature headers as symbol/provenance when no separate stable-ID table exists.
     var = pd.DataFrame(
-        {"gene_symbol": frame.columns.astype(str), "original_gene_id": frame.columns.astype(str)},
-        index=_unique(frame.columns, "feature_id"),
+        {
+            'gene_symbol': frame.columns.astype(str),
+            'original_gene_id': frame.columns.astype(str),
+        },
+        index=_unique(frame.columns, 'feature_id'),
     )
     # Return sparse counts plus aligned cell and feature metadata for the cohort-specific caller to annotate further.
     return sparse.csr_matrix(frame.to_numpy(dtype=np.int32)), obs, var
@@ -692,46 +752,46 @@ def _cell_by_gene(path: Path) -> tuple[sparse.csr_matrix, pd.DataFrame, pd.DataF
 def _smartseq(path: Path, accession: str, map_donors: bool = True) -> ad.AnnData:
     """Read one combined Zhang-lab Smart-seq matrix and retain its peripheral-blood cell columns."""
     # Read the compressed header separately so an unexpected Smart-seq2 layout is rejected before loading the full matrix.
-    with gzip.open(path, "rt") as handle:
+    with gzip.open(path, 'rt') as handle:
         # Inspect the header before full loading to verify this file has the expected Smart-seq2 `geneID`/`symbol` layout.
-        header = handle.readline().rstrip("\n").split("\t")
+        header = handle.readline().rstrip('\n').split('\t')
     # Reject unexpected Smart-seq2 layouts before reading millions of values; donor/gene parsing assumes `geneID` and `symbol` lead the table.
-    if header[:2] != ["geneID", "symbol"]:
+    if header[:2] != ['geneID', 'symbol']:
         # Reject an unexpected Smart-seq2 header because downstream feature/donor parsing depends on this exact layout.
-        raise ValueError(f"Unexpected header in {path}")
+        raise ValueError(f'Unexpected header in {path}')
     # Use expression-column names as source cell IDs because donor parsing depends on the author naming scheme.
-    cells = [name for name in header[2:] if name.startswith("P")]
+    cells = [name for name in header[2:] if name.startswith('P')]
     # Load the combined Smart-seq2 matrix once while preserving expression-column order.
     frame = pd.read_csv(
-        path, sep="\t", usecols=["geneID", "symbol", *cells], compression="gzip"
+        path, sep='\t', usecols=['geneID', 'symbol', *cells], compression='gzip'
     )
     # Remove `geneID` and `symbol` from the numeric Smart-seq2 table while preserving both columns as feature provenance in `var`.
-    gene_ids, symbols = frame.pop("geneID").astype(str), frame.pop("symbol").astype(str)
+    gene_ids, symbols = frame.pop('geneID').astype(str), frame.pop('symbol').astype(str)
     # Build Smart-seq2 feature metadata from the preserved `geneID` and `symbol` columns before transposing the expression values.
     var = pd.DataFrame(
-        {"gene_symbol": symbols.to_numpy(), "original_gene_id": gene_ids.to_numpy()},
-        index=_unique(gene_ids, "feature_id")
+        {'gene_symbol': symbols.to_numpy(), 'original_gene_id': gene_ids.to_numpy()},
+        index=_unique(gene_ids, 'feature_id'),
     )
     # Accumulate one donor label per cell column after parsing author cell-name conventions.
     donors = []
     # Parse donor identity for each Smart-seq2 cell column in matrix order so observation metadata remains aligned after transposition.
     for cell in cells:
         # Parse the trailing donor token from the source cell name because this study encodes sample identity inside each Smart-seq2 column name.
-        match = re.search(r"-([A-Za-z0-9]+)$", cell)
+        match = re.search(r'-([A-Za-z0-9]+)$', cell)
         # Keep the parsed donor suffix only when the expected trailing token is present; malformed names remain unmapped.
-        suffix = match.group(1) if match else ""
+        suffix = match.group(1) if match else ''
         # Resolve the four known date-form aliases first, then construct the normal `P<suffix>` donor label for regular cell names.
-        candidate = DONOR_ALIASES.get(suffix, f"P{suffix}" if suffix else "")
+        candidate = DONOR_ALIASES.get(suffix, f'P{suffix}' if suffix else '')
         # Append donor identity in the same order as Smart-seq2 cell columns so the donor vector stays aligned after the matrix transpose.
-        donors.append(candidate if map_donors and candidate else "UNMAPPED")
+        donors.append(candidate if map_donors and candidate else 'UNMAPPED')
     # Keep the original cell names, source-file label, and mapped donor IDs.
     obs = pd.DataFrame(
         {
-            "cell_barcode": cells,
-            "library_id": path.stem.replace(".txt", ""),
-            "donor_id": donors,
+            'cell_barcode': cells,
+            'library_id': path.stem.replace('.txt', ''),
+            'donor_id': donors,
         },
-        index=pd.Index([f"{accession}:{v}" for v in cells], name="cell_id"),
+        index=pd.Index([f'{accession}:{v}' for v in cells], name='cell_id'),
     )
     # Return Smart-seq2 counts with parsed donor/cell metadata and preserved feature provenance.
     return ad.AnnData(
@@ -747,19 +807,19 @@ def _triplets(raw: Path, pattern: str) -> list[tuple[str, Path, Path, Path]]:
     # Validate every matrix against its expected barcode/features sidecars before returning any triplet to a cohort reader.
     for matrix in sorted(raw.glob(pattern)):
         # Remove the matrix suffix to obtain the shared prefix used to locate its matching barcode and feature files.
-        prefix = matrix.name.removesuffix("_matrix.mtx.gz")
+        prefix = matrix.name.removesuffix('_matrix.mtx.gz')
         # Construct the expected barcode path from the shared matrix prefix.
-        barcodes = raw / f"{prefix}_barcodes.tsv.gz"
+        barcodes = raw / f'{prefix}_barcodes.tsv.gz'
         # Construct the expected feature path from the shared matrix prefix.
-        features = raw / f"{prefix}_features.tsv.gz"
+        features = raw / f'{prefix}_features.tsv.gz'
         # Support legacy 10x deposits by falling back from `features.tsv.gz` to the older `genes.tsv.gz` convention.
         if not features.exists():
             # Construct the expected feature path from the shared matrix prefix.
-            features = raw / f"{prefix}_genes.tsv.gz"
+            features = raw / f'{prefix}_genes.tsv.gz'
         # Support legacy 10x deposits by falling back from `features.tsv.gz` to the older `genes.tsv.gz` convention.
         if not barcodes.exists() or not features.exists():
             # Reject incomplete 10x triplets rather than attempting to pair a matrix with missing/wrong sidecar files.
-            raise FileNotFoundError(f"Incomplete 10x triplet for {prefix}")
+            raise FileNotFoundError(f'Incomplete 10x triplet for {prefix}')
         # Add this triplet only after matrix, barcode, and feature sidecars have all been found; incomplete 10x groups are never returned.
         groups.append((prefix, matrix, barcodes, features))
     # Return only complete matrix/barcode/feature groups in deterministic order.
@@ -773,7 +833,7 @@ def _gencode_v35(reference_dir: Path) -> dict[str, str]:
     # Create the shared reference directory once so the pinned GENCODE/HGNC files can be cached and reused across cohorts.
     reference_dir.mkdir(parents=True, exist_ok=True)
     # Cache the pinned GENCODE GTF under `data/reference` so all cohorts reuse one local annotation.
-    path = reference_dir / "gencode.v35.annotation.gtf.gz"
+    path = reference_dir / 'gencode.v35.annotation.gtf.gz'
     # Use the shared downloader so retries, cache reuse, and `.part` safety behave identically for every reference/source file.
     _download(GENCODE_V35_URL, path)
     # Store only Ensembl gene ID→gene name pairs needed for feature harmonization.
@@ -781,25 +841,25 @@ def _gencode_v35(reference_dir: Path) -> dict[str, str]:
     # Compile the GTF attribute parser once before scanning millions of annotation lines.
     pattern = re.compile(r'(\S+) "([^"]*)"')
     # Stream the compressed GTF line-by-line because a two-column Ensembl→name mapping does not require loading the full annotation table.
-    with gzip.open(path, "rt", encoding="utf-8", errors="replace") as handle:
+    with gzip.open(path, 'rt', encoding='utf-8', errors='replace') as handle:
         # Scan the pinned GTF line-by-line and retain only gene records needed for Ensembl→name mapping.
         for line in handle:
             # Split each GTF line into its nine standard fields before checking feature type and attributes.
-            fields = line.rstrip("\n").split("\t")
+            fields = line.rstrip('\n').split('\t')
             # Skip GTF comments and non-gene records; only gene-level Ensembl IDs and names are needed for feature harmonization.
             if (
-                line.startswith("#")
+                line.startswith('#')
                 or len(fields) != 9
-                or fields[2] not in {"gene", "transcript"}
+                or fields[2] not in {'gene', 'transcript'}
             ):
                 # Skip comments/non-gene GTF records after the validation condition identifies them as irrelevant.
                 continue
             # Parse the semicolon-delimited GTF attribute field into named values such as `gene_id` and `gene_name`.
             attributes = dict(pattern.findall(fields[8]))
             # Read the GENCODE gene name used as the initial readable label for this Ensembl gene.
-            symbol = attributes.get("gene_name", "").strip()
+            symbol = attributes.get('gene_name', '').strip()
             # Remove only the Ensembl version suffix because mapping keys are stored versionless.
-            identifier = attributes.get("gene_id", "").split(".", 1)[0]
+            identifier = attributes.get('gene_id', '').split('.', 1)[0]
             # Add mappings only when both Ensembl gene ID and gene name are present.
             if symbol and identifier:
                 # Keep the first gene-name mapping for each versionless Ensembl ID, avoiding later duplicate annotation records changing the reference.
@@ -812,23 +872,23 @@ def _gencode_v35(reference_dir: Path) -> dict[str, str]:
 def _read_alevin(path: Path, metadata: pd.DataFrame, donor: str) -> ad.AnnData:
     """Read author-retained PBMC cells from one raw Salmon Alevin binary archive."""
     # Recover the sample label from the archive filename so this Alevin object can be tied back to author metadata.
-    sample = re.search(r"GSM\d+_(.+)_Alevin\.tar\.gz$", path.name).group(1)
+    sample = re.search(r'GSM\d+_(.+)_Alevin\.tar\.gz$', path.name).group(1)
     # Build the barcode→retained-cell mapping for this sample before decoding the sparse binary estimates.
     wanted = {
-        v.split(".", 1)[0]: v
+        v.split('.', 1)[0]: v
         for v in metadata.index.astype(str)
-        if v.endswith(f".{sample}")
+        if v.endswith(f'.{sample}')
     }
     # Scope archive access tightly so handles close promptly and no full unpacked copy persists.
-    with tarfile.open(path, "r:gz") as archive:
+    with tarfile.open(path, 'r:gz') as archive:
         # List archive members once so barcode rows, gene columns, and the sparse binary matrix are resolved from one consistent archive snapshot.
         members = archive.getmembers()
         # Locate the Alevin barcode-row file explicitly; the binary matrix does not carry cell identifiers itself.
-        row_member = next(m for m in members if m.name.endswith("quants_mat_rows.txt"))
+        row_member = next(m for m in members if m.name.endswith('quants_mat_rows.txt'))
         # Locate the Alevin gene-column file explicitly so sparse column positions can be mapped back to Ensembl features.
-        col_member = next(m for m in members if m.name.endswith("quants_mat_cols.txt"))
+        col_member = next(m for m in members if m.name.endswith('quants_mat_cols.txt'))
         # Locate the packed sparse estimate matrix explicitly rather than depending on archive member order.
-        matrix_member = next(m for m in members if m.name.endswith("quants_mat.gz"))
+        matrix_member = next(m for m in members if m.name.endswith('quants_mat.gz'))
         # Decode the Alevin barcode-row file so retained metadata barcodes can be matched to streamed sparse matrix rows.
         rows = [v.decode() for v in archive.extractfile(row_member).read().splitlines()]
         # Map Ensembl IDs to readable names while preserving original IDs separately.
@@ -844,9 +904,9 @@ def _read_alevin(path: Path, metadata: pd.DataFrame, donor: str) -> ad.AnnData:
                 # Read the packed nonzero-gene bitmask for one barcode without expanding the full matrix.
                 mask = np.frombuffer(stream.read((len(genes) + 7) // 8), dtype=np.uint8)
                 # Unpack the bitmask to identify which genes have stored values for this barcode.
-                bits = np.unpackbits(mask, bitorder="big")[: len(genes)]
+                bits = np.unpackbits(mask, bitorder='big')[: len(genes)]
                 # Read only the floating-point values corresponding to set bits, preserving the sparse row representation.
-                values = np.frombuffer(stream.read(4 * int(bits.sum())), dtype="<f4")
+                values = np.frombuffer(stream.read(4 * int(bits.sum())), dtype='<f4')
                 # Store sparse values only for retained barcodes; excluded cells are skipped while streaming the binary estimates.
                 if barcode in wanted:
                     # Store this retained barcode's nonzero values as one sparse row without constructing a dense gene vector.
@@ -860,7 +920,7 @@ def _read_alevin(path: Path, metadata: pd.DataFrame, donor: str) -> ad.AnnData:
     # Verify every workbook/metadata-selected Alevin cell was recovered; silent barcode loss would change cohort composition.
     if set(kept) != set(wanted.values()):
         # Surface retained-cell mismatches explicitly because missing Alevin barcodes change cohort composition even when the matrix itself parses.
-        progress(f"  Warning: author-retained cells are missing from {path.name}")
+        progress(f'  Warning: author-retained cells are missing from {path.name}')
     # Assemble retained rows directly into CSR from accumulated values/indices/indptr rather than constructing a dense matrix.
     x = sparse.csr_matrix(
         (np.concatenate(data), np.concatenate(indices), np.asarray(indptr)),
@@ -869,15 +929,15 @@ def _read_alevin(path: Path, metadata: pd.DataFrame, donor: str) -> ad.AnnData:
     # Build observations only for retained cells so row order exactly matches the sliced count matrix.
     obs = metadata.loc[kept].copy()
     # Strip the sample suffix from each retained Alevin key to recover the original deposited cell barcode.
-    obs["cell_barcode"] = [v.split(".", 1)[0] for v in kept]
+    obs['cell_barcode'] = [v.split('.', 1)[0] for v in kept]
     # All cells in this Alevin archive share one donor and one sample archive; record the archive as library/draw while keeping biological donor identity separate.
-    obs["library_id"], obs["donor_id"], obs["draw_id"] = sample, donor, sample
+    obs['library_id'], obs['donor_id'], obs['draw_id'] = sample, donor, sample
     # Prefix retained Alevin barcodes with the accession so their cell IDs remain unique after cross-cohort concatenation.
-    obs.index = pd.Index([f"GSE197543:{v}" for v in kept], name="cell_id")
+    obs.index = pd.Index([f'GSE197543:{v}' for v in kept], name='cell_id')
     # Preserve Ensembl provenance alongside readable symbols for every retained feature.
     var = pd.DataFrame(
-        {"gene_symbol": genes, "original_gene_id": genes},
-        index=_unique(genes, "feature_id"),
+        {'gene_symbol': genes, 'original_gene_id': genes},
+        index=_unique(genes, 'feature_id'),
     )
     # Return counts and aligned metadata together as one AnnData so row/column correspondence cannot be lost.
     return ad.AnnData(X=x, obs=obs, var=var)
@@ -887,9 +947,9 @@ def _read_alevin(path: Path, metadata: pd.DataFrame, donor: str) -> ad.AnnData:
 # Each branch returns one or more (output_name, AnnData) pairs and cleans temporary inputs according to keep_downloads.
 def build_gse(
     accession: str,
-    raw_root: Path = Path("data/downloads"),
+    raw_root: Path = Path('data/downloads'),
     keep_downloads: bool = False,
-    cohort_name: str = "",
+    cohort_name: str = '',
     debug: bool = False,
 ) -> list[tuple[str, ad.AnnData]]:
     """Download and build one supported accession; return [] for anything else."""
@@ -915,104 +975,106 @@ def build_gse(
 
     # Select eligible source files directly from GEO sample records.
     # These negative-control GEO studies share the dedicated negative-record builder below.
-    if accession in {"GSE271896", "GSE275067", "GSE196735", "GSE214283"}:
+    if accession in {'GSE271896', 'GSE275067', 'GSE196735', 'GSE214283'}:
         # Return the negative-control builder output under the standard `filtered_raw_counts` contract expected by `build_all`.
         return _build_new_gse(accession, raw, cohort_name, keep_downloads)
     # Route the CELLxGENE accession to the AIDA reader.
-    if accession == "c838aec3-03ef-4398-b882-0e3912abfff0":
+    if accession == 'c838aec3-03ef-4398-b882-0e3912abfff0':
         # Return the fully filtered `c838aec3-03ef-4398-b882-0e3912abfff0` PBMC AnnData under the standard `filtered_raw_counts` output name expected by `build_all`.
-        return [("filtered_raw_counts", build_aida(raw, keep_downloads, debug=debug))]
+        return [('filtered_raw_counts', build_aida(raw, keep_downloads, debug=debug))]
     # Route the Zenodo accession to the Tsang baseline-sample reader.
-    if accession == "Zenodo10546916":
+    if accession == 'Zenodo10546916':
         # Return the fully filtered `Zenodo10546916` PBMC AnnData under the standard `filtered_raw_counts` output name expected by `build_all`.
-        return [("filtered_raw_counts", build_tsang(raw, keep_downloads))]
+        return [('filtered_raw_counts', build_tsang(raw, keep_downloads))]
 
     # Build GSE98638 from its combined HCC Smart-seq2 count matrix.
-    if accession == "GSE98638":
+    if accession == 'GSE98638':
         # Pin `GSE98638` to the audited source file instead of discovering arbitrary supplementary files that may include excluded/derived data.
-        filename = "GSE98638_HCC.TCell.S5063.count.txt.gz"
+        filename = 'GSE98638_HCC.TCell.S5063.count.txt.gz'
         # Fetch the single audited GSE98638 Smart-seq2 count matrix; no other series supplementary files are required for this cohort.
         _series_files(raw, accession, [filename])
         # Return the fully filtered `GSE98638` PBMC AnnData under the standard `filtered_raw_counts` output name expected by `build_all`.
-        return [("filtered_raw_counts", _smartseq(raw / filename, accession))]
+        return [('filtered_raw_counts', _smartseq(raw / filename, accession))]
 
     # Build GSE99254 from its combined NSCLC Smart-seq2 count matrix.
-    if accession == "GSE99254":
+    if accession == 'GSE99254':
         # Pin `GSE99254` to the audited source file instead of discovering arbitrary supplementary files that may include excluded/derived data.
-        filename = "GSE99254_NSCLC.TCell.S12346.count.txt.gz"
+        filename = 'GSE99254_NSCLC.TCell.S12346.count.txt.gz'
         # Fetch the single audited GSE99254 Smart-seq2 count matrix; tissue/sample selection is encoded in the combined matrix itself.
         _series_files(raw, accession, [filename])
         # Return the fully filtered `GSE99254` PBMC AnnData under the standard `filtered_raw_counts` output name expected by `build_all`.
-        return [("filtered_raw_counts", _smartseq(raw / filename, accession))]
+        return [('filtered_raw_counts', _smartseq(raw / filename, accession))]
 
     # Build GSE108989 from its combined CRC Smart-seq2 count matrix.
-    if accession == "GSE108989":
+    if accession == 'GSE108989':
         # Pin `GSE108989` to the audited source file instead of discovering arbitrary supplementary files that may include excluded/derived data.
-        filename = "GSE108989_CRC.TCell.S11138.count.txt.gz"
+        filename = 'GSE108989_CRC.TCell.S11138.count.txt.gz'
         # Fetch the single audited GSE108989 Smart-seq2 count matrix before applying its source-specific donor handling.
         _series_files(raw, accession, [filename])
         # Return the fully filtered `GSE108989` PBMC AnnData under the standard `filtered_raw_counts` output name expected by `build_all`.
         return [
             (
-                "filtered_raw_counts",
+                'filtered_raw_counts',
                 _smartseq(raw / filename, accession, map_donors=False),
             )
         ]
 
     # Build separate Smart-seq2 and droplet blood-cell H5ADs for GSE140228.
     # This accession contains both Smart-seq2 and droplet data, so the two platforms remain separate H5AD outputs.
-    if accession == "GSE140228":
+    if accession == 'GSE140228':
         # List the exact audited `GSE140228` source files required by this reader; unrelated supplementary files are intentionally ignored.
         names = [
-            "GSE140228_UMI_counts_Droplet.mtx.gz",
-            "GSE140228_UMI_counts_Droplet_barcodes.tsv.gz",
-            "GSE140228_UMI_counts_Droplet_cellinfo.tsv.gz",
-            "GSE140228_UMI_counts_Droplet_genes.tsv.gz",
-            "GSE140228_cell_info_Smartseq2.tsv.gz",
-            "GSE140228_gene_info_Smartseq2.tsv.gz",
-            "GSE140228_read_counts_Smartseq2.csv.gz",
+            'GSE140228_UMI_counts_Droplet.mtx.gz',
+            'GSE140228_UMI_counts_Droplet_barcodes.tsv.gz',
+            'GSE140228_UMI_counts_Droplet_cellinfo.tsv.gz',
+            'GSE140228_UMI_counts_Droplet_genes.tsv.gz',
+            'GSE140228_cell_info_Smartseq2.tsv.gz',
+            'GSE140228_gene_info_Smartseq2.tsv.gz',
+            'GSE140228_read_counts_Smartseq2.csv.gz',
         ]
         # Download the seven explicitly required GSE140228 files together because Smart-seq2 and droplet outputs share one accession but use separate count/metadata components.
         _series_files(raw, accession, names)
         # Load the `GSE140228` expression table while preserving source cell-column order for metadata alignment.
         counts = pd.read_csv(raw / names[6], index_col=0)
         # Load `GSE140228` cell annotations before slicing counts so blood/PBMC status and donor identity drive selection.
-        cell_info = pd.read_csv(raw / names[4], sep="\t", index_col=0)
+        cell_info = pd.read_csv(raw / names[4], sep='\t', index_col=0)
         # Define retained `GSE140228` cells/samples from this study's eligibility rule and apply the same selection to counts and metadata.
         keep = cell_info.index[
-            cell_info["Tissue"].astype(str).str.casefold().eq("blood")
+            cell_info['Tissue'].astype(str).str.casefold().eq('blood')
         ]
         # Load the `GSE140228` expression table while preserving source cell-column order for metadata alignment.
         counts = counts.loc[:, keep]
         # Copy only retained `GSE140228` metadata rows so observation order stays synchronized with the sliced matrix.
         obs = cell_info.loc[keep].copy()
         # Attach source barcode and biological donor together so provenance is retained independently of the globally unique AnnData index.
-        obs["cell_barcode"], obs["donor_id"] = (
+        obs['cell_barcode'], obs['donor_id'] = (
             obs.index.astype(str),
-            obs["Donor"].astype(str),
+            obs['Donor'].astype(str),
         )
         # Record the technical library independently of donor identity so technical replicates remain visible.
-        obs["library_id"] = "GSE140228_Smartseq2"
+        obs['library_id'] = 'GSE140228_Smartseq2'
         # Prefix source cell IDs with accession/library context so cell indices remain globally unique after cohort concatenation.
         obs.index = pd.Index(
-            [f"GSE140228:Smartseq2:{v}" for v in obs.index], name="cell_id"
+            [f'GSE140228:Smartseq2:{v}' for v in obs.index], name='cell_id'
         )
         # Load `GSE140228` feature annotations separately so stable IDs and readable symbols are both retained.
-        genes = pd.read_csv(raw / names[5], sep="\t")
+        genes = pd.read_csv(raw / names[5], sep='\t')
         # Identify the stable gene-ID column by name when possible and fall back to the first column so minor source-header variations do not break provenance.
         id_col = next(
-            (c for c in genes if "gene" in c.lower() and "id" in c.lower()),
+            (c for c in genes if 'gene' in c.lower() and 'id' in c.lower()),
             genes.columns[0],
         )
         # Identify the readable symbol/name column independently from the stable ID column; if absent, use the ID rather than inventing a symbol.
         symbol_col = next(
-            (c for c in genes if "symbol" in c.lower() or "name" in c.lower()), id_col
+            (c for c in genes if 'symbol' in c.lower() or 'name' in c.lower()), id_col
         )
         # Build `GSE140228` feature metadata with both readable symbols and original source IDs for auditable harmonization.
         var = pd.DataFrame(
-            {"gene_symbol": genes[symbol_col].astype(str).to_numpy(),
-             "original_gene_id": genes[id_col].astype(str).to_numpy()},
-            index=_unique(genes[id_col].astype(str), "feature_id"),
+            {
+                'gene_symbol': genes[symbol_col].astype(str).to_numpy(),
+                'original_gene_id': genes[id_col].astype(str).to_numpy(),
+            },
+            index=_unique(genes[id_col].astype(str), 'feature_id'),
         )
         # Construct the Smart-seq2 blood-only AnnData after filtering columns by author tissue metadata and transposing genes×cells to cells×genes.
         smartseq = ad.AnnData(
@@ -1024,34 +1086,34 @@ def build_gse(
         # Read `GSE140228` barcodes exactly as deposited so counts can be aligned safely to cell metadata.
         barcodes = _table(raw / names[1]).iloc[:, 0].astype(str)
         # Load `GSE140228` cell annotations before slicing counts so blood/PBMC status and donor identity drive selection.
-        cell_info = pd.read_csv(raw / names[2], sep="\t", index_col=0)
+        cell_info = pd.read_csv(raw / names[2], sep='\t', index_col=0)
         # Load `GSE140228` feature annotations separately so stable IDs and readable symbols are both retained.
-        genes = pd.read_csv(raw / names[3], sep="\t")
+        genes = pd.read_csv(raw / names[3], sep='\t')
         # Build `GSE140228` feature metadata with both readable symbols and original source IDs for auditable harmonization.
         var = pd.DataFrame(
             {
-                "gene_symbol": genes["SYMBOL"].astype(str).to_numpy(),
-                "original_gene_id": genes["ENSEMBL"].astype(str).to_numpy(),
+                'gene_symbol': genes['SYMBOL'].astype(str).to_numpy(),
+                'original_gene_id': genes['ENSEMBL'].astype(str).to_numpy(),
             },
-            index=_unique(genes["ENSEMBL"].astype(str), "feature_id"),
+            index=_unique(genes['ENSEMBL'].astype(str), 'feature_id'),
         )
         # Build a barcode→matrix-row lookup for `GSE140228` so metadata-selected cells are sliced in the same order as `obs`.
         positions = pd.Series(np.arange(len(barcodes)), index=barcodes.to_numpy())
         # Define retained `GSE140228` cells/samples from this study's eligibility rule and apply the same selection to counts and metadata.
         keep = cell_info.index[
-            cell_info["Tissue"].astype(str).str.casefold().eq("blood")
+            cell_info['Tissue'].astype(str).str.casefold().eq('blood')
         ]
         # Copy only retained `GSE140228` metadata rows so observation order stays synchronized with the sliced matrix.
         obs = cell_info.loc[keep].copy()
         # Attach source barcode and biological donor together so provenance is retained independently of the globally unique AnnData index.
-        obs["cell_barcode"], obs["donor_id"] = (
+        obs['cell_barcode'], obs['donor_id'] = (
             keep.astype(str),
-            obs["Donor"].astype(str),
+            obs['Donor'].astype(str),
         )
         # Record the technical library independently of donor identity so technical replicates remain visible.
-        obs["library_id"] = "GSE140228_Droplet"
+        obs['library_id'] = 'GSE140228_Droplet'
         # Prefix source cell IDs with accession/library context so cell indices remain globally unique after cohort concatenation.
-        obs.index = pd.Index([f"GSE140228:Droplet:{v}" for v in keep], name="cell_id")
+        obs.index = pd.Index([f'GSE140228:Droplet:{v}' for v in keep], name='cell_id')
         # Construct the droplet blood-only AnnData by slicing sparse matrix rows through the barcode→position lookup, preserving the metadata-selected cell order.
         droplet = ad.AnnData(
             X=x[positions.loc[keep].to_numpy(dtype=int)].astype(np.int32),
@@ -1060,57 +1122,57 @@ def build_gse(
         )
         # Return Smart-seq2 and droplet blood objects under separate output names so `build_all` saves them separately and assigns the matching sample-sheet Protocol to each.
         return [
-            ("smartseq2_filtered_raw_counts", smartseq),
-            ("droplet_filtered_raw_counts", droplet),
+            ('smartseq2_filtered_raw_counts', smartseq),
+            ('droplet_filtered_raw_counts', droplet),
         ]
 
     # Build GSE114727 from nine blood inDrop library partitions belonging to two breast-cancer donors.
-    if accession == "GSE114727":
+    if accession == 'GSE114727':
         # Encode the audited `GSE114727` donor/sample allowlist explicitly so only intended PBMC inputs enter the build.
         samples = [
-            ("GSM3148585", "BC01_BLOOD1"),
-            ("GSM3148586", "BC01_BLOOD3"),
-            ("GSM3148614", "BC04_BLOOD1"),
-            ("GSM3148615", "BC04_BLOOD2"),
-            ("GSM3148616", "BC04_BLOOD3"),
-            ("GSM3148617", "BC04_BLOOD4"),
-            ("GSM3148618", "BC04_BLOOD5"),
-            ("GSM3148619", "BC04_BLOOD6"),
-            ("GSM3148620", "BC04_BLOOD7"),
+            ('GSM3148585', 'BC01_BLOOD1'),
+            ('GSM3148586', 'BC01_BLOOD3'),
+            ('GSM3148614', 'BC04_BLOOD1'),
+            ('GSM3148615', 'BC04_BLOOD2'),
+            ('GSM3148616', 'BC04_BLOOD3'),
+            ('GSM3148617', 'BC04_BLOOD4'),
+            ('GSM3148618', 'BC04_BLOOD5'),
+            ('GSM3148619', 'BC04_BLOOD6'),
+            ('GSM3148620', 'BC04_BLOOD7'),
         ]
         # Collect parsed `GSE114727` libraries temporarily; raw inputs can be deleted after parsing and concatenated afterward.
         objects = []
         # Read all nine blood inDrop libraries because BC01 and BC04 are split across technical libraries that must be recombined without inflating donor count.
         for number, (gsm, library) in enumerate(samples, 1):
             # Expose per-input progress because several cohorts contain dozens or hundreds of source files and would otherwise appear stalled.
-            progress(f"  Downloading input {number}/{len(samples)}", end="\r")
+            progress(f'  Downloading input {number}/{len(samples)}')
             # Resolve the exact `GSE114727` source file for this sample/library inside the accession-local workspace.
-            path = _sample_file(raw, gsm, f"{gsm}_{library}_counts.csv.gz")
+            path = _sample_file(raw, gsm, f'{gsm}_{library}_counts.csv.gz')
             # Read this inDrop cell-by-gene table into sparse counts plus cell/feature metadata before attaching the blood-library donor identity.
             x, obs, var = _cell_by_gene(path)
             # Delete this parsed source immediately when downloads are not retained, preventing raw files from accumulating across cohorts.
             remove_inputs(path)
             # Recover biological donor identity for `GSE114727` from its naming convention so technical libraries do not become fake patients.
-            donor = library.split("_", 1)[0]
+            donor = library.split('_', 1)[0]
             # Save the deposited barcode in a column before prefixing the AnnData index for cross-cohort uniqueness.
-            obs["cell_barcode"] = obs.index.astype(str)
+            obs['cell_barcode'] = obs.index.astype(str)
             # Keep technical library and biological donor separate so lanes/partitions cannot be mistaken for independent patients.
-            obs["library_id"], obs["donor_id"] = library, donor
+            obs['library_id'], obs['donor_id'] = library, donor
             # Prefix source cell IDs with accession/library context so cell indices remain globally unique after cohort concatenation.
             obs.index = _unique(
-                [f"GSE114727:{library}:{v}" for v in obs.index], "cell_id"
+                [f'GSE114727:{library}:{v}' for v in obs.index], 'cell_id'
             )
             # Add the fully parsed library/sample after donor/library metadata are attached; cohort concatenation happens after all inputs are converted.
             objects.append(ad.AnnData(X=x, obs=obs, var=var))
         # Return the fully filtered `GSE114727` PBMC AnnData under the standard `filtered_raw_counts` output name expected by `build_all`.
-        return [("filtered_raw_counts", _concat(objects))]
+        return [('filtered_raw_counts', _concat(objects))]
 
     # Build GSE155698 from the 17 deposited PDAC PBMC archives representing 16 donors.
-    if accession == "GSE155698":
+    if accession == 'GSE155698':
         # Recreate the deposited PDAC library order, including 10A/10B technical partitions that map to the same donor 10.
         labels = (
             [str(i) for i in range(1, 10)]
-            + ["10A", "10B"]
+            + ['10A', '10B']
             + [str(i) for i in range(11, 17)]
         )
         # Collect parsed `GSE155698` libraries temporarily; raw inputs can be deleted after parsing and concatenated afterward.
@@ -1118,104 +1180,104 @@ def build_gse(
         # Read all 17 PDAC archives; 10A and 10B remain separate technical libraries but both map to biological donor 10.
         for offset, label in enumerate(labels):
             # Expose per-input progress because several cohorts contain dozens or hundreds of source files and would otherwise appear stalled.
-            progress(f"  Downloading input {offset + 1}/{len(labels)}", end="\r")
+            progress(f'  Downloading input {offset + 1}/{len(labels)}')
             # Derive the consecutive GSM accession corresponding to this ordered PDAC library label.
-            gsm = f"GSM{4710709 + offset}"
+            gsm = f'GSM{4710709 + offset}'
             # Resolve the exact `GSE155698` source file for this sample/library inside the accession-local workspace.
-            path = _sample_file(raw, gsm, f"{gsm}_PDAC_PBMC_{label}.tar.gz")
+            path = _sample_file(raw, gsm, f'{gsm}_PDAC_PBMC_{label}.tar.gz')
             # Add the fully parsed library/sample after donor/library metadata are attached; cohort concatenation happens after all inputs are converted.
             objects.append(
                 _read_10x_archive(
                     path,
-                    f"PDAC_PBMC_{label}",
-                    f"PDAC_PBMC_{re.sub(r'[AB]$', '', label)}",
+                    f'PDAC_PBMC_{label}',
+                    f'PDAC_PBMC_{re.sub(r"[AB]$", "", label)}',
                 )
             )
             # Delete this parsed source immediately when downloads are not retained, preventing raw files from accumulating across cohorts.
             remove_inputs(path)
         # Return the fully filtered `GSE155698` PBMC AnnData under the standard `filtered_raw_counts` output name expected by `build_all`.
-        return [("filtered_raw_counts", _concat(objects))]
+        return [('filtered_raw_counts', _concat(objects))]
 
     # Build GSE162025 from ten explicitly selected nasopharyngeal-cancer PBMC count tables.
-    if accession == "GSE162025":
+    if accession == 'GSE162025':
         # Encode the audited `GSE162025` donor/sample allowlist explicitly so only intended PBMC inputs enter the build.
         patients = [
-            "1802",
-            "1805",
-            "1806",
-            "1807",
-            "1808",
-            "1810",
-            "1811",
-            "1813",
-            "1815",
-            "1816",
+            '1802',
+            '1805',
+            '1806',
+            '1807',
+            '1808',
+            '1810',
+            '1811',
+            '1813',
+            '1815',
+            '1816',
         ]
         # Collect parsed `GSE162025` libraries temporarily; raw inputs can be deleted after parsing and concatenated afterward.
         objects = []
         # Walk the ten audited patients in the curated order used to derive their alternating GEO GEX accessions.
         for i, patient in enumerate(patients):
             # Expose per-input progress because several cohorts contain dozens or hundreds of source files and would otherwise appear stalled.
-            progress(f"  Downloading input {i + 1}/{len(patients)}", end="\r")
+            progress(f'  Downloading input {i + 1}/{len(patients)}')
             # Advance two GSM accessions per patient because this series alternates GEX and paired immune-receptor records; only the GEX sample is built here.
-            gsm = f"GSM{4929845 + 2 * i}"
+            gsm = f'GSM{4929845 + 2 * i}'
             # Resolve the exact `GSE162025` source file for this sample/library inside the accession-local workspace.
-            path = _sample_file(raw, gsm, f"{gsm}_NPC_SC_{patient}_PBMC_count.csv.gz")
+            path = _sample_file(raw, gsm, f'{gsm}_NPC_SC_{patient}_PBMC_count.csv.gz')
             # Parse the NPC PBMC gene-by-cell CSV and transpose it to sparse cells×genes before adding patient/library identifiers.
-            x, obs, var = _gene_by_cell(path, ",")
+            x, obs, var = _gene_by_cell(path, ',')
             # Delete this parsed source immediately when downloads are not retained, preventing raw files from accumulating across cohorts.
             remove_inputs(path)
             # Save the deposited barcode in a column before prefixing the AnnData index for cross-cohort uniqueness.
-            obs["cell_barcode"] = obs.index.astype(str)
+            obs['cell_barcode'] = obs.index.astype(str)
             # Keep technical library and biological donor separate so lanes/partitions cannot be mistaken for independent patients.
-            obs["library_id"], obs["donor_id"] = f"NPC_{patient}_PBMC", patient
+            obs['library_id'], obs['donor_id'] = f'NPC_{patient}_PBMC', patient
             # Prefix source cell IDs with accession/library context so cell indices remain globally unique after cohort concatenation.
             obs.index = pd.Index(
-                [f"GSE162025:{patient}:{v}" for v in obs.index], name="cell_id"
+                [f'GSE162025:{patient}:{v}' for v in obs.index], name='cell_id'
             )
             # Add the fully parsed library/sample after donor/library metadata are attached; cohort concatenation happens after all inputs are converted.
             objects.append(ad.AnnData(X=x, obs=obs, var=var))
         # Return the fully filtered `GSE162025` PBMC AnnData under the standard `filtered_raw_counts` output name expected by `build_all`.
-        return [("filtered_raw_counts", _concat(objects))]
+        return [('filtered_raw_counts', _concat(objects))]
 
     # Build GSE145281 from the four treatment-naive ccRCC blood matrices.
-    if accession == "GSE145281":
+    if accession == 'GSE145281':
         # Collect parsed `GSE145281` libraries temporarily; raw inputs can be deleted after parsing and concatenated afterward.
         objects = []
         # Read exactly the four treatment-naive blood matrices identified by the cohort audit.
         for i in range(1, 5):
             # Expose per-input progress because several cohorts contain dozens or hundreds of source files and would otherwise appear stalled.
-            progress(f"  Downloading input {i}/4", end="\r")
+            progress(f'  Downloading input {i}/4')
             # Derive the four consecutive ccRCC blood GSM/filename pairs from their documented numbering, excluding tumor and other series records.
-            gsm, filename = f"GSM{4317762 + i}", f"GSM{4317762 + i}_Blood{i}_raw.txt.gz"
+            gsm, filename = f'GSM{4317762 + i}', f'GSM{4317762 + i}_Blood{i}_raw.txt.gz'
             # Resolve the exact `GSE145281` source file for this sample/library inside the accession-local workspace.
             path = _sample_file(raw, gsm, filename)
             # Parse the ccRCC raw blood table using whitespace separation because these files are not regular comma/tab-delimited matrices.
-            x, obs, var = _gene_by_cell(path, "whitespace")
+            x, obs, var = _gene_by_cell(path, 'whitespace')
             # Delete this parsed source immediately when downloads are not retained, preventing raw files from accumulating across cohorts.
             remove_inputs(path)
             # Save the deposited barcode in a column before prefixing the AnnData index for cross-cohort uniqueness.
-            obs["cell_barcode"] = obs.index.astype(str)
+            obs['cell_barcode'] = obs.index.astype(str)
             # Keep technical library and biological donor separate so lanes/partitions cannot be mistaken for independent patients.
-            obs["library_id"], obs["donor_id"] = f"Blood{i}", f"donor{i}"
+            obs['library_id'], obs['donor_id'] = f'Blood{i}', f'donor{i}'
             # Prefix source cell IDs with accession/library context so cell indices remain globally unique after cohort concatenation.
             obs.index = pd.Index(
-                [f"GSE145281:Blood{i}:{v}" for v in obs.index], name="cell_id"
+                [f'GSE145281:Blood{i}:{v}' for v in obs.index], name='cell_id'
             )
             # Add the fully parsed library/sample after donor/library metadata are attached; cohort concatenation happens after all inputs are converted.
             objects.append(ad.AnnData(X=x, obs=obs, var=var))
         # Return the fully filtered `GSE145281` PBMC AnnData under the standard `filtered_raw_counts` output name expected by `build_all`.
-        return [("filtered_raw_counts", _concat(objects))]
+        return [('filtered_raw_counts', _concat(objects))]
 
     # Build GSE267718 from the five explicitly eligible bladder-cancer PBMC libraries.
-    if accession == "GSE267718":
+    if accession == 'GSE267718':
         # Encode the audited `GSE267718` donor/sample allowlist explicitly so only intended PBMC inputs enter the build.
         samples = [
-            ("GSM8273662", "Patient5PBMC"),
-            ("GSM8273664", "Patient6PBMC"),
-            ("GSM8273667", "Patient7APBMC"),
-            ("GSM8273673", "Patient8PBMC"),
-            ("GSM8273676", "Patient9PBMC"),
+            ('GSM8273662', 'Patient5PBMC'),
+            ('GSM8273664', 'Patient6PBMC'),
+            ('GSM8273667', 'Patient7APBMC'),
+            ('GSM8273673', 'Patient8PBMC'),
+            ('GSM8273676', 'Patient9PBMC'),
         ]
         # Collect parsed `GSE267718` libraries temporarily; raw inputs can be deleted after parsing and concatenated afterward.
         objects = []
@@ -1226,35 +1288,39 @@ def build_gse(
         # Build each eligible bladder PBMC sample as its own 10x triplet so donor-specific library/chemistry provenance stays separate until concatenation.
         for gsm, label in samples:
             # Construct the shared `GSE267718` file prefix used to download/match one matrix with its barcode and feature sidecars.
-            prefix = f"{gsm}_{label}"
+            prefix = f'{gsm}_{label}'
             # Fetch the three required 10x components for this `GSE267718` library using the same shared prefix.
-            for suffix in ("barcodes.tsv.gz", "genes.tsv.gz", "matrix.mtx.gz"):
+            for suffix in ('barcodes.tsv.gz', 'genes.tsv.gz', 'matrix.mtx.gz'):
                 # Advance the bladder triplet counter once per downloaded component so progress reflects all matrix/barcode/gene files, not just donors.
                 input_number += 1
                 # Expose per-input progress because several cohorts contain dozens or hundreds of source files and would otherwise appear stalled.
-                progress(f"  Downloading input {input_number}/{total_inputs}", end="\r")
+                progress(f'  Downloading input {input_number}/{total_inputs}')
                 # Download this specific bladder 10x component through the shared GSM cache/retry path.
-                _sample_file(raw, gsm, f"{prefix}_{suffix}")
+                _sample_file(raw, gsm, f'{prefix}_{suffix}')
             # Recover biological donor identity for `GSE267718` from its naming convention so technical libraries do not become fake patients.
-            donor = re.search(r"Patient(?:5|6|7A|8|9)", label).group(0)
+            donor = re.search(r'Patient(?:5|6|7A|8|9)', label).group(0)
             # Add the fully parsed library/sample after donor/library metadata are attached; cohort concatenation happens after all inputs are converted.
             objects.append(
                 _read_10x(
-                    raw / f"{prefix}_matrix.mtx.gz",
-                    raw / f"{prefix}_barcodes.tsv.gz",
-                    raw / f"{prefix}_genes.tsv.gz",
+                    raw / f'{prefix}_matrix.mtx.gz',
+                    raw / f'{prefix}_barcodes.tsv.gz',
+                    raw / f'{prefix}_genes.tsv.gz',
                     prefix,
                     donor,
                 )
             )
             # Delete this parsed source immediately when downloads are not retained, preventing raw files from accumulating across cohorts.
-            remove_inputs(*(raw / f"{prefix}_{suffix}" for suffix in
-                            ("matrix.mtx.gz", "barcodes.tsv.gz", "genes.tsv.gz")))
+            remove_inputs(
+                *(
+                    raw / f'{prefix}_{suffix}'
+                    for suffix in ('matrix.mtx.gz', 'barcodes.tsv.gz', 'genes.tsv.gz')
+                )
+            )
         # Return the fully filtered `GSE267718` PBMC AnnData under the standard `filtered_raw_counts` output name expected by `build_all`.
-        return [("filtered_raw_counts", _concat(objects))]
+        return [('filtered_raw_counts', _concat(objects))]
 
     # Build GSE123139 from the treatment-naive p13 and p17 PBMC MARS-seq plates.
-    if accession == "GSE123139":
+    if accession == 'GSE123139':
         # Parse `GSE123139` GEO metadata before downloading counts so inclusion is driven by author sample annotations.
         records = _soft_samples(_soft(raw, accession))
         # Download only `GSE123139` files that pass both biological eligibility and accepted file-type filtering.
@@ -1262,57 +1328,57 @@ def build_gse(
             raw,
             records,
             lambda r: (
-                str(r.get("sample source", "")).casefold() == "pbmc"
-                and str(r.get("patient id", "")).casefold().startswith(("p13_", "p17_"))
+                str(r.get('sample source', '')).casefold() == 'pbmc'
+                and str(r.get('patient id', '')).casefold().startswith(('p13_', 'p17_'))
             ),
-            lambda name: name.endswith(".txt.gz"),
+            lambda name: name.endswith('.txt.gz'),
             download=False,
         )
         # Index MARS-seq GEO records by plate title so each downloaded count plate can recover the correct donor/FACS metadata without rescanning all records.
-        records_by_title = {r.get("title", ""): r for r in records}
+        records_by_title = {r.get('title', ''): r for r in records}
         # Collect parsed `GSE123139` libraries temporarily; raw inputs can be deleted after parsing and concatenated afterward.
         objects = []
         # Read each selected MARS-seq plate separately because several plates belong to one donor and must not be counted as independent patients.
         for number, path in enumerate(paths, 1):
             # Expose per-input progress because several cohorts contain dozens or hundreds of source files and would otherwise appear stalled.
-            progress(f"  Downloading input {number}/{len(paths)}", end="\r")
+            progress(f'  Downloading input {number}/{len(paths)}')
             # Ensure this selected MARS-seq plate file is locally cached through the shared GSM downloader before parsing it.
-            _sample_file(raw, path.name.split("_", 1)[0], path.name)
+            _sample_file(raw, path.name.split('_', 1)[0], path.name)
             # Parse the `GSE123139` FACS/library plate identifier from the filename so it can be joined back to GEO sample metadata.
-            plate = re.search(r"_(AB\d+)\.txt\.gz$", path.name).group(1)
+            plate = re.search(r'_(AB\d+)\.txt\.gz$', path.name).group(1)
             # Recover the parsed GEO record associated with this `GSE123139` file so donor/tissue fields come from source metadata rather than filename guessing.
             record = records_by_title[plate]
             # Recover biological donor identity for `GSE123139` from its naming convention so technical libraries do not become fake patients.
             donor = (
-                "p13"
-                if str(record["patient id"]).casefold().startswith("p13_")
-                else "p17"
+                'p13'
+                if str(record['patient id']).casefold().startswith('p13_')
+                else 'p17'
             )
             # Parse each MARS-seq plate as a tab-delimited gene-by-cell table so multiple plates can later be combined without treating them as donors.
-            x, obs, var = _gene_by_cell(path, "\t")
+            x, obs, var = _gene_by_cell(path, '\t')
             # Delete this parsed source immediately when downloads are not retained, preventing raw files from accumulating across cohorts.
             remove_inputs(path)
             # Save the deposited barcode in a column before prefixing the AnnData index for cross-cohort uniqueness.
-            obs["cell_barcode"] = obs.index.astype(str)
+            obs['cell_barcode'] = obs.index.astype(str)
             # Keep technical library and biological donor separate so lanes/partitions cannot be mistaken for independent patients.
-            obs["library_id"], obs["donor_id"] = plate, donor
+            obs['library_id'], obs['donor_id'] = plate, donor
             # Prefix source cell IDs with accession/library context so cell indices remain globally unique after cohort concatenation.
             obs.index = pd.Index(
-                [f"GSE123139:{plate}:{v}" for v in obs.index], name="cell_id"
+                [f'GSE123139:{plate}:{v}' for v in obs.index], name='cell_id'
             )
             # Add the fully parsed library/sample after donor/library metadata are attached; cohort concatenation happens after all inputs are converted.
             objects.append(ad.AnnData(X=x, obs=obs, var=var))
         # Return the fully filtered `GSE123139` PBMC AnnData under the standard `filtered_raw_counts` output name expected by `build_all`.
-        return [("filtered_raw_counts", _concat(objects))]
+        return [('filtered_raw_counts', _concat(objects))]
 
     # Build GSE181061 from the combined ccRCC CD45-positive matrix after selecting PBMC metadata rows.
-    if accession == "GSE181061":
+    if accession == 'GSE181061':
         # List the exact audited `GSE181061` source files required by this reader; unrelated supplementary files are intentionally ignored.
         names = [
-            "GSE181061_ccRCC_4pt_scRNAseq_CD45plus_matrix.mtx.gz",
-            "GSE181061_ccRCC_4pt_scRNAseq_CD45plus_barcodes.tsv.gz",
-            "GSE181061_ccRCC_4pt_scRNAseq_CD45plus_genes.tsv.gz",
-            "GSE181061_ccRCC_4pt_scRNAseq_CD45plus_final_Metadata.txt.gz",
+            'GSE181061_ccRCC_4pt_scRNAseq_CD45plus_matrix.mtx.gz',
+            'GSE181061_ccRCC_4pt_scRNAseq_CD45plus_barcodes.tsv.gz',
+            'GSE181061_ccRCC_4pt_scRNAseq_CD45plus_genes.tsv.gz',
+            'GSE181061_ccRCC_4pt_scRNAseq_CD45plus_final_Metadata.txt.gz',
         ]
         # Download the exact GSE181061 matrix/barcode/feature/metadata files audited for the four eligible blood donors.
         _series_files(raw, accession, names)
@@ -1324,30 +1390,30 @@ def build_gse(
             _make_var(_table(raw / names[2])),
         )
         # Load the author cell metadata used to select PBMC barcodes and map those cells back to their biological donors.
-        metadata = pd.read_csv(raw / names[3], sep="\t", index_col=0)
+        metadata = pd.read_csv(raw / names[3], sep='\t', index_col=0)
         # Build a barcode→matrix-row lookup for `GSE181061` so metadata-selected cells are sliced in the same order as `obs`.
         positions = pd.Series(np.arange(len(barcodes)), index=barcodes.to_numpy())
         # Define retained `GSE181061` cells/samples from this study's eligibility rule and apply the same selection to counts and metadata.
-        keep = metadata.index[metadata["tissue"].astype(str).str.casefold().eq("pbmc")]
+        keep = metadata.index[metadata['tissue'].astype(str).str.casefold().eq('pbmc')]
         # Copy only retained `GSE181061` metadata rows so observation order stays synchronized with the sliced matrix.
         obs = metadata.loc[keep].copy()
         # Attach source barcode and biological donor together so provenance is retained independently of the globally unique AnnData index.
-        obs["cell_barcode"], obs["donor_id"] = (
+        obs['cell_barcode'], obs['donor_id'] = (
             keep.astype(str),
-            obs["Patient"].astype(str),
+            obs['Patient'].astype(str),
         )
         # Record the technical library independently of donor identity so technical replicates remain visible.
-        obs["library_id"] = (
+        obs['library_id'] = (
             obs.index.astype(str)
-            .str.extract(r"^Pt\d+_([^_]+_[^_]+_[^_]+)", expand=False)
-            .fillna("combined")
+            .str.extract(r'^Pt\d+_([^_]+_[^_]+_[^_]+)', expand=False)
+            .fillna('combined')
         )
         # Prefix source cell IDs with accession/library context so cell indices remain globally unique after cohort concatenation.
-        obs.index = pd.Index([f"GSE181061:{v}" for v in keep], name="cell_id")
+        obs.index = pd.Index([f'GSE181061:{v}' for v in keep], name='cell_id')
         # Return the fully filtered `GSE181061` PBMC AnnData under the standard `filtered_raw_counts` output name expected by `build_all`.
         return [
             (
-                "filtered_raw_counts",
+                'filtered_raw_counts',
                 ad.AnnData(
                     X=x[positions.loc[keep].to_numpy(dtype=int)].astype(np.int32),
                     obs=obs,
@@ -1357,7 +1423,7 @@ def build_gse(
         ]
 
     # Build GSE139324 from 26 explicitly numbered HNSCC PBMC 10x libraries.
-    if accession == "GSE139324":
+    if accession == 'GSE139324':
         # Collect parsed `GSE139324` libraries temporarily; raw inputs can be deleted after parsing and concatenated afterward.
         objects = []
         # Reset the HNSCC triplet progress counter before downloading one 10x matrix/barcode/feature set for each of 26 PBMC donors.
@@ -1368,94 +1434,101 @@ def build_gse(
         for patient in range(1, 27):
             # Derive the HNSCC GSM and shared 10x filename prefix for this patient so its matrix, barcodes, and features are downloaded as one matched triplet.
             gsm, prefix = (
-                f"GSM{4138108 + 2 * patient}",
-                f"GSM{4138108 + 2 * patient}_HNSCC_{patient}_PBMC",
+                f'GSM{4138108 + 2 * patient}',
+                f'GSM{4138108 + 2 * patient}_HNSCC_{patient}_PBMC',
             )
             # Fetch the three required 10x components for this `GSE139324` library using the same shared prefix.
-            for suffix in ("barcodes.tsv.gz", "genes.tsv.gz", "matrix.mtx.gz"):
+            for suffix in ('barcodes.tsv.gz', 'genes.tsv.gz', 'matrix.mtx.gz'):
                 # Advance the HNSCC triplet counter once per downloaded component so the 78-file progress display remains accurate.
                 input_number += 1
                 # Expose per-input progress because several cohorts contain dozens or hundreds of source files and would otherwise appear stalled.
-                progress(f"  Downloading input {input_number}/{total_inputs}", end="\r")
+                progress(f'  Downloading input {input_number}/{total_inputs}')
                 # Download this patient's HNSCC matrix/barcode/feature component using the GSM-level cache/retry path.
-                _sample_file(raw, gsm, f"{prefix}_{suffix}")
+                _sample_file(raw, gsm, f'{prefix}_{suffix}')
             # Add the fully parsed library/sample after donor/library metadata are attached; cohort concatenation happens after all inputs are converted.
             objects.append(
                 _read_10x(
-                    raw / f"{prefix}_matrix.mtx.gz",
-                    raw / f"{prefix}_barcodes.tsv.gz",
-                    raw / f"{prefix}_genes.tsv.gz",
+                    raw / f'{prefix}_matrix.mtx.gz',
+                    raw / f'{prefix}_barcodes.tsv.gz',
+                    raw / f'{prefix}_genes.tsv.gz',
                     prefix,
-                    f"HNSCC_{patient}",
+                    f'HNSCC_{patient}',
                 )
             )
             # Delete this parsed source immediately when downloads are not retained, preventing raw files from accumulating across cohorts.
-            remove_inputs(*(raw / f"{prefix}_{suffix}" for suffix in
-                            ("matrix.mtx.gz", "barcodes.tsv.gz", "genes.tsv.gz")))
+            remove_inputs(
+                *(
+                    raw / f'{prefix}_{suffix}'
+                    for suffix in ('matrix.mtx.gz', 'barcodes.tsv.gz', 'genes.tsv.gz')
+                )
+            )
         # Return the fully filtered `GSE139324` PBMC AnnData under the standard `filtered_raw_counts` output name expected by `build_all`.
-        return [("filtered_raw_counts", _concat(objects))]
+        return [('filtered_raw_counts', _concat(objects))]
 
     # Build GSE314004 from seven H5ADs after decoding patient sample tags and excluding healthy controls.
     # Decode sample-tag multiplexing in the deposited H5ADs and retain only workbook-selected cancer donors.
-    if accession == "GSE314004":
+    if accession == 'GSE314004':
         # Parse `GSE314004` GEO metadata before downloading counts so inclusion is driven by author sample annotations.
         records = _soft_samples(_soft(raw, accession))
         # Download only `GSE314004` files that pass both biological eligibility and accepted file-type filtering.
         paths = _download_selected(
-            raw, records, lambda r: True, lambda name: name.endswith(".h5ad"),
+            raw,
+            records,
+            lambda r: True,
+            lambda name: name.endswith('.h5ad'),
             download=False,
         )
         # Index `GSE314004` GEO records by GSM once so each matrix can recover donor/tissue metadata without rescanning all records.
-        records_by_gsm = {r["gsm"]: r for r in records}
+        records_by_gsm = {r['gsm']: r for r in records}
         # Collect parsed `GSE314004` libraries temporarily; raw inputs can be deleted after parsing and concatenated afterward.
         objects = []
         # Process each multiplexed Rhapsody H5AD separately so sample-tag→donor mapping is resolved within the correct library before concatenation.
         for number, path in enumerate(paths, 1):
             # Expose per-input progress because several cohorts contain dozens or hundreds of source files and would otherwise appear stalled.
-            progress(f"  Downloading input {number}/{len(paths)}", end="\r")
+            progress(f'  Downloading input {number}/{len(paths)}')
             # Ensure this multiplexed Rhapsody H5AD is locally cached before opening it and resolving its sample-tag mapping.
-            _sample_file(raw, path.name.split("_", 1)[0], path.name)
+            _sample_file(raw, path.name.split('_', 1)[0], path.name)
             # Extract the GSM from the Rhapsody filename while opening the H5AD; that GSM keys the correct GEO sample-tag→donor metadata.
-            gsm, source = path.name.split("_", 1)[0], ad.read_h5ad(path)
+            gsm, source = path.name.split('_', 1)[0], ad.read_h5ad(path)
             # Delete this parsed source immediately when downloads are not retained, preventing raw files from accumulating across cohorts.
             remove_inputs(path)
             # Recover the parsed GEO record associated with this `GSE314004` file so donor/tissue fields come from source metadata rather than filename guessing.
             record = records_by_gsm[gsm]
             # Build the `GSE314004` sample-tag→donor mapping from GEO metadata before assigning donor IDs to multiplexed cells.
             tag_map = {
-                f"SampleTag{int(m.group(1)):02d}_hs": str(value)
+                f'SampleTag{int(m.group(1)):02d}_hs': str(value)
                 for key, value in record.items()
-                if (m := re.fullmatch(r"st(\d+)", str(key)))
+                if (m := re.fullmatch(r'st(\d+)', str(key)))
             }
             # Map each `GSE314004` cell's deposited sample tag to the biological donor defined in the GEO record.
-            donors = source.obs["Sample_Tag"].astype(str).map(tag_map)
+            donors = source.obs['Sample_Tag'].astype(str).map(tag_map)
             # Define retained `GSE314004` cells/samples from this study's eligibility rule and apply the same selection to counts and metadata.
             keep = donors.notna() & ~donors.str.match(
-                r"^(?:HD|Spike)", case=False, na=False
+                r'^(?:HD|Spike)', case=False, na=False
             )
             # Preserve the existing eligible donor selection.
-            keep &= ~donors.isin(["GBM27", "GBM35", "GBM36"])
+            keep &= ~donors.isin(['GBM27', 'GBM35', 'GBM36'])
             # Copy only retained `GSE314004` metadata rows so observation order stays synchronized with the sliced matrix.
             obs = source.obs.loc[keep].copy()
             # Preserve deposited barcode and technical library before replacing the DataFrame index with a globally unique cell ID.
-            obs["cell_barcode"], obs["library_id"] = (
+            obs['cell_barcode'], obs['library_id'] = (
                 obs.index.astype(str),
-                path.stem.split("_", 1)[1],
+                path.stem.split('_', 1)[1],
             )
             # Assign the biological donor key used for patient grouping and train/test leakage control.
-            obs["donor_id"] = donors.loc[keep].astype(str).to_numpy()
+            obs['donor_id'] = donors.loc[keep].astype(str).to_numpy()
             # Record the biological draw separately from donor identity so repeated collections from one patient do not collapse.
-            obs["draw_id"] = obs["donor_id"]
+            obs['draw_id'] = obs['donor_id']
             # Prefix source cell IDs with accession/library context so cell indices remain globally unique after cohort concatenation.
-            obs.index = _unique([f"{gsm}:{v}" for v in obs.index], "cell_id")
+            obs.index = _unique([f'{gsm}:{v}' for v in obs.index], 'cell_id')
             # Copy source feature metadata before adding missing symbol provenance so the deposited H5AD is not mutated.
             var = source.var.copy()
             # Populate `gene_symbol` from source feature names only when the Rhapsody H5AD does not already provide that column.
-            if "gene_symbol" not in var:
+            if 'gene_symbol' not in var:
                 # Store a readable gene symbol separately from the feature index so aliases can be corrected without losing provenance.
-                var["gene_symbol"] = source.var_names.astype(str)
+                var['gene_symbol'] = source.var_names.astype(str)
             # Preserve the deposited feature identifier before harmonization so each final gene remains traceable to its source ID.
-            var["original_gene_id"] = source.var_names.astype(str)
+            var['original_gene_id'] = source.var_names.astype(str)
             # Add the fully parsed library/sample after donor/library metadata are attached; cohort concatenation happens after all inputs are converted.
             objects.append(
                 ad.AnnData(
@@ -1463,33 +1536,33 @@ def build_gse(
                 )
             )
         # Return the fully filtered `GSE314004` PBMC AnnData under the standard `filtered_raw_counts` output name expected by `build_all`.
-        return [("filtered_raw_counts", _concat(objects))]
+        return [('filtered_raw_counts', _concat(objects))]
 
     # Build GSE253173 from the baseline Timepoint 0 rows in its compressed DREAM H5AD.
     # The source object is longitudinal; only baseline Timepoint 0 rows are retained for classifier input.
-    if accession == "GSE253173":
+    if accession == 'GSE253173':
         # Pin `GSE253173` to the audited source file instead of discovering arbitrary supplementary files that may include excluded/derived data.
-        filename = "GSE253173_single_cell_DREAM.h5ad.gz"
+        filename = 'GSE253173_single_cell_DREAM.h5ad.gz'
         # Download the single compressed DREAM H5AD that contains all longitudinal GSE253173 samples.
         _series_files(raw, accession, [filename])
         # Create a temporary uncompressed H5AD path because AnnData cannot open the outer `.h5ad.gz` wrapper directly.
-        expanded = raw / filename.removesuffix(".gz")
+        expanded = raw / filename.removesuffix('.gz')
         # Stream the outer gzip wrapper into a temporary ordinary `.h5ad` file because `anndata.read_h5ad` cannot open the extra gzip layer directly.
         with (
-            gzip.open(raw / filename, "rb") as source,
-            expanded.open("wb") as destination,
+            gzip.open(raw / filename, 'rb') as source,
+            expanded.open('wb') as destination,
         ):
             # Stream-copy decompressed bytes in chunks instead of reading the entire compressed H5AD into memory.
             shutil.copyfileobj(source, destination, length=16 * 1024 * 1024)
         # Delete this parsed source immediately when downloads are not retained, preventing raw files from accumulating across cohorts.
         remove_inputs(raw / filename)
         # Open the decompressed DREAM H5AD in backed mode so baseline-cell selection can be decided from metadata before loading expression values.
-        source = ad.read_h5ad(expanded, backed="r")
+        source = ad.read_h5ad(expanded, backed='r')
         # Protect baseline extraction so the backed file handle and temporary decompressed H5AD are cleaned up even if slicing fails.
         try:
             # Define retained `GSE253173` cells/samples from this study's eligibility rule and apply the same selection to counts and metadata.
             keep = np.flatnonzero(
-                source.obs["Timepoint"].astype(str).eq("0").to_numpy()
+                source.obs['Timepoint'].astype(str).eq('0').to_numpy()
             )
             # Materialize only baseline Timepoint-0 cells into a standalone AnnData before closing and deleting the backed source file.
             result = ad.AnnData(
@@ -1503,32 +1576,32 @@ def build_gse(
             # Remove this temporary/raw file after its information has been safely transferred into memory or final output.
             expanded.unlink(missing_ok=True)
         # Save the deposited barcode in a column before prefixing the AnnData index for cross-cohort uniqueness.
-        result.obs["cell_barcode"] = result.obs_names.astype(str)
+        result.obs['cell_barcode'] = result.obs_names.astype(str)
         # Record the technical library independently of donor identity so technical replicates remain visible.
-        result.obs["library_id"] = result.obs["LibraryName"].astype(str)
+        result.obs['library_id'] = result.obs['LibraryName'].astype(str)
         # Assign the biological donor key used for patient grouping and train/test leakage control.
-        result.obs["donor_id"] = result.obs["library_id"]
+        result.obs['donor_id'] = result.obs['library_id']
         # Prefer the source `gene` column when available, falling back to `var_names`, so this H5AD retains a readable gene label for every feature.
         symbols = (
-            result.var["gene"].astype(str)
-            if "gene" in result.var
+            result.var['gene'].astype(str)
+            if 'gene' in result.var
             else result.var_names.astype(str)
         )
         # Preserve the deposited feature identifier before harmonization so each final gene remains traceable to its source ID.
-        result.var["original_gene_id"] = result.var_names.astype(str)
+        result.var['original_gene_id'] = result.var_names.astype(str)
         # Store a readable gene symbol separately from the feature index so aliases can be corrected without losing provenance.
-        result.var["gene_symbol"] = np.asarray(symbols)
+        result.var['gene_symbol'] = np.asarray(symbols)
         # Cast the final matrix to integer counts because this reader is exporting count-scale data rather than normalized expression.
         result.X = result.X.astype(np.int32)
         # Prefix source cell IDs with accession/library context so cell indices remain globally unique after cohort concatenation.
         result.obs_names = _unique(
-            [f"GSE253173:{v}" for v in result.obs_names], "cell_id"
+            [f'GSE253173:{v}' for v in result.obs_names], 'cell_id'
         )
         # Return the fully filtered `GSE253173` PBMC AnnData under the standard `filtered_raw_counts` output name expected by `build_all`.
-        return [("filtered_raw_counts", result)]
+        return [('filtered_raw_counts', result)]
 
     # Build GSE264489 from treatment-naive PBMC libraries for donors Ov1, Ov3, and Ov6.
-    if accession == "GSE264489":
+    if accession == 'GSE264489':
         # Parse `GSE264489` GEO metadata before downloading counts so inclusion is driven by author sample annotations.
         records = _soft_samples(_soft(raw, accession))
         # Download only `GSE264489` files that pass both biological eligibility and accepted file-type filtering.
@@ -1536,32 +1609,32 @@ def build_gse(
             raw,
             records,
             lambda r: (
-                bool(re.search(r"_Ov(?:1|3|6)\b", str(r.get("title", ""))))
-                and str(r.get("treatment", "")).casefold() == "treatment-naive"
+                bool(re.search(r'_Ov(?:1|3|6)\b', str(r.get('title', ''))))
+                and str(r.get('treatment', '')).casefold() == 'treatment-naive'
             ),
             lambda name: name.endswith(
-                ("barcodes.tsv.gz", "features.tsv.gz", "matrix.mtx.gz")
+                ('barcodes.tsv.gz', 'features.tsv.gz', 'matrix.mtx.gz')
             ),
         )
         # Collect parsed `GSE264489` libraries temporarily; raw inputs can be deleted after parsing and concatenated afterward.
         objects = []
         # Process each `GSE264489` matrix triplet independently so donor/library identity is attached before concatenation.
-        for prefix, matrix, barcodes, features in _triplets(raw, "*_Ov*_matrix.mtx.gz"):
+        for prefix, matrix, barcodes, features in _triplets(raw, '*_Ov*_matrix.mtx.gz'):
             # Recover biological donor identity for `GSE264489` from its naming convention so technical libraries do not become fake patients.
-            donor = re.search(r"_(Ov(?:1|3|6))$", prefix).group(1)
+            donor = re.search(r'_(Ov(?:1|3|6))$', prefix).group(1)
             # Parse this `GSE264489` matrix/library into AnnData with donor/library provenance before deleting the source file.
             obj = _read_10x(matrix, barcodes, features, prefix, donor)
             # Delete this parsed source immediately when downloads are not retained, preventing raw files from accumulating across cohorts.
             remove_inputs(matrix, barcodes, features)
             # Record the biological draw separately from donor identity so repeated collections from one patient do not collapse.
-            obj.obs["draw_id"] = prefix
+            obj.obs['draw_id'] = prefix
             # Add the fully parsed library/sample after donor/library metadata are attached; cohort concatenation happens after all inputs are converted.
             objects.append(obj)
         # Return the fully filtered `GSE264489` PBMC AnnData under the standard `filtered_raw_counts` output name expected by `build_all`.
-        return [("filtered_raw_counts", _concat(objects))]
+        return [('filtered_raw_counts', _concat(objects))]
 
     # Build GSE341191 from the five peripheral-blood samples collected before IRE treatment.
-    if accession == "GSE341191":
+    if accession == 'GSE341191':
         # Parse `GSE341191` GEO metadata before downloading counts so inclusion is driven by author sample annotations.
         records = _soft_samples(_soft(raw, accession))
         # Download only `GSE341191` files that pass both biological eligibility and accepted file-type filtering.
@@ -1569,14 +1642,14 @@ def build_gse(
             raw,
             records,
             lambda r: (
-                "before ire" in str(r.get("title", "")).casefold()
-                and "peripheral blood"
-                in str(r.get("tissue", r.get("cell type", ""))).casefold()
+                'before ire' in str(r.get('title', '')).casefold()
+                and 'peripheral blood'
+                in str(r.get('tissue', r.get('cell type', ''))).casefold()
             ),
             lambda name: (
-                "_PRE_" in name
+                '_PRE_' in name
                 and name.endswith(
-                    ("barcodes.tsv.gz", "features.tsv.gz", "matrix.mtx.gz")
+                    ('barcodes.tsv.gz', 'features.tsv.gz', 'matrix.mtx.gz')
                 )
             ),
         )
@@ -1584,29 +1657,29 @@ def build_gse(
         objects = []
         # Process each `GSE341191` matrix triplet independently so donor/library identity is attached before concatenation.
         for prefix, matrix, barcodes, features in _triplets(
-            raw, "*_P*_PRE_matrix.mtx.gz"
+            raw, '*_P*_PRE_matrix.mtx.gz'
         ):
             # Recover biological donor identity for `GSE341191` from its naming convention so technical libraries do not become fake patients.
-            donor = re.search(r"_(P[1-5])_PRE$", prefix).group(1)
+            donor = re.search(r'_(P[1-5])_PRE$', prefix).group(1)
             # Parse this `GSE341191` matrix/library into AnnData with donor/library provenance before deleting the source file.
             obj = _read_10x(matrix, barcodes, features, prefix, donor)
             # Delete this parsed source immediately when downloads are not retained, preventing raw files from accumulating across cohorts.
             remove_inputs(matrix, barcodes, features)
             # Record the biological draw separately from donor identity so repeated collections from one patient do not collapse.
-            obj.obs["draw_id"] = prefix
+            obj.obs['draw_id'] = prefix
             # Add the fully parsed library/sample after donor/library metadata are attached; cohort concatenation happens after all inputs are converted.
             objects.append(obj)
         # Return the fully filtered `GSE341191` PBMC AnnData under the standard `filtered_raw_counts` output name expected by `build_all`.
-        return [("filtered_raw_counts", _concat(objects))]
+        return [('filtered_raw_counts', _concat(objects))]
 
     # Build GSE234129 from the two eligible peripheral-blood samples in its combined matrix.
-    if accession == "GSE234129":
+    if accession == 'GSE234129':
         # List the exact audited `GSE234129` source files required by this reader; unrelated supplementary files are intentionally ignored.
         names = [
-            "GSE234129_barcodes.tsv.gz",
-            "GSE234129_count_matrix.mtx.gz",
-            "GSE234129_features.tsv.gz",
-            "GSE234129_meta.tsv.gz",
+            'GSE234129_barcodes.tsv.gz',
+            'GSE234129_count_matrix.mtx.gz',
+            'GSE234129_features.tsv.gz',
+            'GSE234129_meta.tsv.gz',
         ]
         # Download the exact GSE234129 matrix/barcode/feature/metadata files used to select its two eligible peripheral-blood samples.
         _series_files(raw, accession, names)
@@ -1618,39 +1691,39 @@ def build_gse(
             _make_var(_table(raw / names[2])),
         )
         # Load the author metadata table that identifies the two retained blood samples and provides patient/sample labels for `obs`.
-        metadata = pd.read_csv(raw / names[3], sep="\t", index_col=0)
+        metadata = pd.read_csv(raw / names[3], sep='\t', index_col=0)
         # Refuse metadata assignment when barcode order differs because cells would otherwise receive incorrect annotations.
         if not np.array_equal(
             barcodes.to_numpy(), metadata.index.astype(str).to_numpy()
         ):
             # Stop `GSE234129` processing when a source-specific alignment/validation assumption fails; continuing would mislabel cells.
-            raise ValueError("GSE234129 barcodes and metadata are not aligned")
+            raise ValueError('GSE234129 barcodes and metadata are not aligned')
         # Define retained `GSE234129` cells/samples from this study's eligibility rule and apply the same selection to counts and metadata.
-        keep = metadata["sample"].isin(["MDA_Pt2-PB", "MDA_Pt5-PBMC"]).to_numpy()
+        keep = metadata['sample'].isin(['MDA_Pt2-PB', 'MDA_Pt5-PBMC']).to_numpy()
         # Copy only retained `GSE234129` metadata rows so observation order stays synchronized with the sliced matrix.
         obs = metadata.loc[keep].copy()
         # Preserve deposited barcode and technical library before replacing the DataFrame index with a globally unique cell ID.
-        obs["cell_barcode"], obs["library_id"] = (
+        obs['cell_barcode'], obs['library_id'] = (
             obs.index.astype(str),
-            obs["sample"].astype(str),
+            obs['sample'].astype(str),
         )
         # Keep patient identity separate from draw identity so longitudinal samples remain distinct but can still be grouped by donor.
-        obs["donor_id"], obs["draw_id"] = (
-            obs["patient"].astype(str),
-            obs["sample"].astype(str),
+        obs['donor_id'], obs['draw_id'] = (
+            obs['patient'].astype(str),
+            obs['sample'].astype(str),
         )
         # Prefix source cell IDs with accession/library context so cell indices remain globally unique after cohort concatenation.
-        obs.index = pd.Index([f"GSE234129:{v}" for v in obs.index], name="cell_id")
+        obs.index = pd.Index([f'GSE234129:{v}' for v in obs.index], name='cell_id')
         # Return the fully filtered `GSE234129` PBMC AnnData under the standard `filtered_raw_counts` output name expected by `build_all`.
         return [
             (
-                "filtered_raw_counts",
+                'filtered_raw_counts',
                 ad.AnnData(X=x[keep].astype(np.int32), obs=obs, var=var),
             )
         ]
 
     # Build GSE238130 from the 28 GEO samples identified as peripheral blood.
-    if accession == "GSE238130":
+    if accession == 'GSE238130':
         # Parse `GSE238130` GEO metadata before downloading counts so inclusion is driven by author sample annotations.
         records = _soft_samples(_soft(raw, accession))
         # Download only `GSE238130` files that pass both biological eligibility and accepted file-type filtering.
@@ -1658,76 +1731,76 @@ def build_gse(
             raw,
             records,
             lambda r: (
-                "peripheral blood"
-                in str(r.get("tissue", r.get("cell type", ""))).casefold()
+                'peripheral blood'
+                in str(r.get('tissue', r.get('cell type', ''))).casefold()
             ),
             lambda name: name.endswith(
-                ("barcodes.tsv.gz", "features.tsv.gz", "matrix.mtx.gz")
+                ('barcodes.tsv.gz', 'features.tsv.gz', 'matrix.mtx.gz')
             ),
         )
         # Index `GSE238130` GEO records by GSM once so each matrix can recover donor/tissue metadata without rescanning all records.
-        records_by_gsm = {r["gsm"]: r for r in records}
+        records_by_gsm = {r['gsm']: r for r in records}
         # Collect parsed `GSE238130` libraries temporarily; raw inputs can be deleted after parsing and concatenated afterward.
         objects = []
         # Process each `GSE238130` matrix triplet independently so donor/library identity is attached before concatenation.
-        for prefix, matrix, barcodes, features in _triplets(raw, "GSM*_matrix.mtx.gz"):
+        for prefix, matrix, barcodes, features in _triplets(raw, 'GSM*_matrix.mtx.gz'):
             # Recover the parsed GEO record associated with this `GSE238130` file so donor/tissue fields come from source metadata rather than filename guessing.
-            record = records_by_gsm[prefix.split("_", 1)[0]]
+            record = records_by_gsm[prefix.split('_', 1)[0]]
             # Recover biological donor identity for `GSE238130` from its naming convention so technical libraries do not become fake patients.
-            donor = str(record.get("individual", "")) or re.search(
-                r"_(pair_\d+|single_(?:active|indolent)_\d+)(?:_|$)", prefix
+            donor = str(record.get('individual', '')) or re.search(
+                r'_(pair_\d+|single_(?:active|indolent)_\d+)(?:_|$)', prefix
             ).group(1)
             # Parse this `GSE238130` matrix/library into AnnData with donor/library provenance before deleting the source file.
             obj = _read_10x(matrix, barcodes, features, prefix, donor)
             # Delete this parsed source immediately when downloads are not retained, preventing raw files from accumulating across cohorts.
             remove_inputs(matrix, barcodes, features)
             # Record the biological draw separately from donor identity so repeated collections from one patient do not collapse.
-            obj.obs["draw_id"] = prefix
+            obj.obs['draw_id'] = prefix
             # Add the fully parsed library/sample after donor/library metadata are attached; cohort concatenation happens after all inputs are converted.
             objects.append(obj)
         # Merge retained `GSE238130` libraries only after donor/library identities are standardized.
         result = _concat(objects)
         # Return the fully filtered `GSE238130` PBMC AnnData under the standard `filtered_raw_counts` output name expected by `build_all`.
-        return [("filtered_raw_counts", result)]
+        return [('filtered_raw_counts', result)]
 
     # Build GSE197543 from five PBMC Alevin archives using shared author-retained cell metadata.
-    if accession == "GSE197543":
+    if accession == 'GSE197543':
         # Parse `GSE197543` GEO metadata before downloading counts so inclusion is driven by author sample annotations.
         records = _soft_samples(_soft(raw, accession))
         # Pin the shared GSE197543 author cell-metadata filename used to decide which Alevin barcodes were retained as PBMC cells.
-        metadata_name = "GSE197543_colData.txt.gz"
+        metadata_name = 'GSE197543_colData.txt.gz'
         # Download the shared GSE197543 cell metadata once before opening any donor-specific Alevin archives.
         _series_files(raw, accession, [metadata_name])
         # Read the shared author metadata with cell IDs as the index so Alevin retained-cell keys can be joined directly.
-        metadata = pd.read_csv(raw / metadata_name, sep="\t", index_col=0)
+        metadata = pd.read_csv(raw / metadata_name, sep='\t', index_col=0)
         # Restrict shared author metadata to PBMC samples before matching Alevin archives, excluding tumor/tissue rows at the metadata stage.
-        metadata = metadata.loc[metadata["Sample"].astype(str).str.endswith("_PBMC")]
+        metadata = metadata.loc[metadata['Sample'].astype(str).str.endswith('_PBMC')]
         # Collect only `GSE197543` supplementary archives whose GEO metadata and filenames identify eligible PBMC/Alevin inputs.
         selected = []
         # Scan GEO records for PBMC samples first, then retain only Alevin archives attached to those blood records.
         for record in records:
             # Skip `GSE197543` GEO records that are not PBMC before inspecting/downloading their Alevin archives.
-            if str(record.get("tissue", "")).casefold() != "pbmc":
+            if str(record.get('tissue', '')).casefold() != 'pbmc':
                 # Skip this GEO record immediately when it is not the required PBMC tissue.
                 continue
             # Inspect supplementary URLs from this `GSE197543` GEO record to find the specific raw-count archive type accepted by the reader.
-            for url in record["supplementary"]:
+            for url in record['supplementary']:
                 # Pin `GSE197543` to the audited source file instead of discovering arbitrary supplementary files that may include excluded/derived data.
-                filename = url.rsplit("/", 1)[-1]
+                filename = url.rsplit('/', 1)[-1]
                 # Keep only `_Alevin.tar.gz` supplementary files attached to PBMC GEO records; other supplements are metadata or derived products.
-                if filename.endswith("_Alevin.tar.gz"):
+                if filename.endswith('_Alevin.tar.gz'):
                     # Add this `GSE197543` Alevin archive only after both GEO tissue metadata and filename type identify it as an eligible PBMC input.
-                    selected.append((record["gsm"], filename))
+                    selected.append((record['gsm'], filename))
         # Collect parsed `GSE197543` libraries temporarily; raw inputs can be deleted after parsing and concatenated afterward.
         objects = []
         # Read each eligible PBMC Alevin archive independently so donor-specific sparse rows can be validated against the shared author metadata.
         for number, (gsm, filename) in enumerate(selected, 1):
             # Expose per-input progress because several cohorts contain dozens or hundreds of source files and would otherwise appear stalled.
-            progress(f"  Downloading input {number}/{len(selected)}", end="\r")
+            progress(f'  Downloading input {number}/{len(selected)}')
             # Resolve the exact `GSE197543` source file for this sample/library inside the accession-local workspace.
             path = _sample_file(raw, gsm, filename)
             # Recover biological donor identity for `GSE197543` from its naming convention so technical libraries do not become fake patients.
-            donor = re.search(r"GBM_(\d+)_PBMC", filename).group(1)
+            donor = re.search(r'GBM_(\d+)_PBMC', filename).group(1)
             # Add the fully parsed library/sample after donor/library metadata are attached; cohort concatenation happens after all inputs are converted.
             objects.append(_read_alevin(path, metadata, donor))
             # Delete input files after use when the caller has disabled keeping downloads.
@@ -1735,10 +1808,10 @@ def build_gse(
                 # Remove this temporary/raw file after its information has been safely transferred into memory or final output.
                 path.unlink()
         # Return the fully filtered `GSE197543` PBMC AnnData under the standard `filtered_raw_counts` output name expected by `build_all`.
-        return [("filtered_raw_counts", _concat(objects))]
+        return [('filtered_raw_counts', _concat(objects))]
 
     # Build GSE217845 from peripheral-blood libraries for eligible donors PDAC_50, PDAC_55, and PDAC_60.
-    if accession == "GSE217845":
+    if accession == 'GSE217845':
         # Parse `GSE217845` GEO metadata before downloading counts so inclusion is driven by author sample annotations.
         records = _soft_samples(_soft(raw, accession))
         # Download only `GSE217845` files that pass both biological eligibility and accepted file-type filtering.
@@ -1746,31 +1819,31 @@ def build_gse(
             raw,
             records,
             lambda r: (
-                "peripheral blood" in str(r.get("title", "")).casefold()
-                and bool(re.search(r"PDAC_(?:50|55|60)", str(r.get("title", ""))))
+                'peripheral blood' in str(r.get('title', '')).casefold()
+                and bool(re.search(r'PDAC_(?:50|55|60)', str(r.get('title', ''))))
             ),
             lambda name: name.endswith(
-                ("barcodes.tsv.gz", "features.tsv.gz", "matrix.mtx.gz")
+                ('barcodes.tsv.gz', 'features.tsv.gz', 'matrix.mtx.gz')
             ),
         )
         # Collect parsed `GSE217845` libraries temporarily; raw inputs can be deleted after parsing and concatenated afterward.
         objects = []
         # Process each `GSE217845` matrix triplet independently so donor/library identity is attached before concatenation.
         for prefix, matrix, barcodes, features in _triplets(
-            raw, "*_PDAC_*_PB_matrix.mtx.gz"
+            raw, '*_PDAC_*_PB_matrix.mtx.gz'
         ):
             # Recover biological donor identity for `GSE217845` from its naming convention so technical libraries do not become fake patients.
-            donor = re.search(r"_(PDAC_\d+)_PB$", prefix).group(1)
+            donor = re.search(r'_(PDAC_\d+)_PB$', prefix).group(1)
             # Parse this `GSE217845` matrix/library into AnnData with donor/library provenance before deleting the source file.
             obj = _read_10x(matrix, barcodes, features, prefix, donor)
             # Delete this parsed source immediately when downloads are not retained, preventing raw files from accumulating across cohorts.
             remove_inputs(matrix, barcodes, features)
             # Record the biological draw separately from donor identity so repeated collections from one patient do not collapse.
-            obj.obs["draw_id"] = prefix
+            obj.obs['draw_id'] = prefix
             # Add the fully parsed library/sample after donor/library metadata are attached; cohort concatenation happens after all inputs are converted.
             objects.append(obj)
         # Return the fully filtered `GSE217845` PBMC AnnData under the standard `filtered_raw_counts` output name expected by `build_all`.
-        return [("filtered_raw_counts", _concat(objects))]
+        return [('filtered_raw_counts', _concat(objects))]
 
     # Return the negative-control builder output under the standard `filtered_raw_counts` contract expected by `build_all`.
     return []
@@ -1780,49 +1853,66 @@ def build_gse(
 def _read_h5_counts(path: Path, record: dict, accession: str) -> ad.AnnData:
     """Read RNA counts and identify cells using the deposited sample record."""
     # Scope HDF5 access so large file handles close immediately after sparse arrays/metadata are extracted.
-    with h5py.File(path, "r") as handle:
+    with h5py.File(path, 'r') as handle:
         # Use the 10x HDF5 `matrix` group because sparse arrays, barcodes, and feature metadata are aligned there.
-        matrix = handle["matrix"]
+        matrix = handle['matrix']
         # Reconstruct the sparse matrix from HDF5 arrays and transpose to cells×genes without dense expansion.
         x = sparse.csc_matrix(
-            (matrix["data"][:], matrix["indices"][:], matrix["indptr"][:]),
-            shape=tuple(matrix["shape"][:]),
+            (matrix['data'][:], matrix['indices'][:], matrix['indptr'][:]),
+            shape=tuple(matrix['shape'][:]),
         ).T.tocsr()
         # Read feature IDs/names/types from the same HDF5 group so `var` stays aligned with matrix columns.
-        features = matrix["features"]
+        features = matrix['features']
         # Normalize HDF5 feature metadata into the common source-ID/gene-symbol schema.
-        var = _make_var(pd.DataFrame({
-            0: features["id"].asstr()[:], 1: features["name"].asstr()[:],
-            2: features["feature_type"].asstr()[:],
-        }))
+        var = _make_var(
+            pd.DataFrame(
+                {
+                    0: features['id'].asstr()[:],
+                    1: features['name'].asstr()[:],
+                    2: features['feature_type'].asstr()[:],
+                }
+            )
+        )
         # Read barcodes in matrix order so observation metadata can be attached without reordering cells.
-        barcodes = matrix["barcodes"].asstr()[:]
+        barcodes = matrix['barcodes'].asstr()[:]
         # Prefer GEO's explicit subject ID and fall back to the title-derived donor only when the record lacks a subject field.
-        donor = record.get("subject id", record["title"].rsplit("-", 1)[0])
+        donor = record.get('subject id', record['title'].rsplit('-', 1)[0])
         # Use the PB kit/draw token embedded in Gustafson HISE filenames; other cohorts use the GEO sample title as their draw key.
-        draw = re.search(r'PB\d+-\d+', path.name).group() if accession in {"GSE271896", "GSE275067"} else record["title"]
+        draw = (
+            re.search(r'PB\d+-\d+', path.name).group()
+            if accession in {'GSE271896', 'GSE275067'}
+            else record['title']
+        )
         # Create one observation per barcode using the audited sample record for donor/draw identity.
-        obs = pd.DataFrame({"cell_barcode": barcodes, "library_id": record["gsm"],
-                            "donor_id": donor, "draw_id": draw},
-                           index=pd.Index([f'{record["gsm"]}:{b}' for b in barcodes], name="cell_id"))
+        obs = pd.DataFrame(
+            {
+                'cell_barcode': barcodes,
+                'library_id': record['gsm'],
+                'donor_id': donor,
+                'draw_id': draw,
+            },
+            index=pd.Index([f'{record["gsm"]}:{b}' for b in barcodes], name='cell_id'),
+        )
         # Start with every HDF5 barcode eligible, then tighten this mask with accession-specific per-cell draw selection.
         keep = np.ones(len(obs), dtype=bool)
         # For Gustafson HISE files, filter at the embedded per-cell sample-ID level because one deposited HDF5 can pool multiple draws.
-        if accession in {"GSE271896", "GSE275067"}:
+        if accession in {'GSE271896', 'GSE275067'}:
             # Read embedded HISE observation metadata because these negative cohorts require per-cell sample IDs beyond the top-level GEO record.
-            source = matrix["observations"]
+            source = matrix['observations']
             # Replace HISE's processed barcode with the embedded original barcode so final provenance points to the deposited cell identity.
-            obs["cell_barcode"] = source["original_barcodes"].asstr()[:]
+            obs['cell_barcode'] = source['original_barcodes'].asstr()[:]
             # Use the accession-specific embedded sample field (`pbmc_sample_id` versus `sampleID`) needed to match cells to the audited draw.
-            field = "pbmc_sample_id" if accession == "GSE271896" else "sampleID"
+            field = 'pbmc_sample_id' if accession == 'GSE271896' else 'sampleID'
             # Use the embedded per-cell HISE sample ID because a pooled HDF5 can contain cells from several biological draws.
-            obs["draw_id"] = source[field].asstr()[:]
+            obs['draw_id'] = source[field].asstr()[:]
             # Tighten the HISE cell mask to the audited draw embedded in per-cell sample metadata, excluding other pooled draws in the same file.
-            keep &= obs["draw_id"].eq(draw).to_numpy()
+            keep &= obs['draw_id'].eq(draw).to_numpy()
     # Keep only HDF5 features labeled `Gene Expression`; protein or other feature types are excluded from the RNA classifier matrix.
-    genes = var["feature_type"].eq("Gene Expression").to_numpy()
+    genes = var['feature_type'].eq('Gene Expression').to_numpy()
     # Return only the retained cells and `Gene Expression` features, applying the same masks to X, obs, and var so all axes remain aligned.
-    return ad.AnnData(X=x[keep][:, genes], obs=obs.loc[keep].copy(), var=var.loc[genes].copy())
+    return ad.AnnData(
+        X=x[keep][:, genes], obs=obs.loc[keep].copy(), var=var.loc[genes].copy()
+    )
 
 
 # Read expression CSV inputs used by cohorts whose audited public source is deposited in this format.
@@ -1835,16 +1925,24 @@ def _read_expression_csv(path: Path, cells=None, dtype=np.float32) -> ad.AnnData
     # Initialize chunk accumulators so the wide expression CSV can be read incrementally rather than loading the entire pandas table into memory.
     blocks, genes = [], []
     # Read the wide expression CSV in 512-gene chunks so pandas memory stays bounded while all retained cell columns remain aligned.
-    for frame in pd.read_csv(path, index_col=0, usecols=[header[0], *wanted], chunksize=512):
+    for frame in pd.read_csv(
+        path, index_col=0, usecols=[header[0], *wanted], chunksize=512
+    ):
         # Append this chunk's gene names in read order so final `var` matches the vertical order of the sparse expression blocks.
         genes.extend(frame.index.astype(str))
         # Convert each pandas chunk to CSR immediately, limiting peak memory and avoiding one full dense copy of the expression table.
         blocks.append(sparse.csr_matrix(frame.to_numpy(dtype=dtype)))
     # Create one feature row per accumulated gene name after chunked reading, preserving the same order used to vertically stack expression blocks.
-    var = pd.DataFrame({"gene_symbol": genes, "original_gene_id": genes}, index=_unique(genes, "feature_id"))
+    var = pd.DataFrame(
+        {'gene_symbol': genes, 'original_gene_id': genes},
+        index=_unique(genes, 'feature_id'),
+    )
     # Return counts and aligned metadata together as one AnnData so row/column correspondence cannot be lost.
-    return ad.AnnData(X=sparse.vstack(blocks, format="csr").T.tocsr(),
-                      obs=pd.DataFrame(index=pd.Index(wanted)), var=var)
+    return ad.AnnData(
+        X=sparse.vstack(blocks, format='csr').T.tocsr(),
+        obs=pd.DataFrame(index=pd.Index(wanted)),
+        var=var,
+    )
 
 
 # Restrict negative-control records to the audited healthy/baseline samples before matrix loading.
@@ -1853,47 +1951,62 @@ def _negative_records(accession, records):
     # Convert parsed GEO records to a DataFrame so accession-specific healthy/baseline filters can be expressed as vectorized metadata rules.
     frame = pd.DataFrame(records)
     # GSE271896 needs visit-level timing logic because donors have vaccination and non-vaccination visits; only unperturbed pre-vaccine draws qualify.
-    if accession == "GSE271896":
+    if accession == 'GSE271896':
         # Convert days-since-first-visit to numeric values so vaccination timing comparisons are chronological rather than lexicographic.
-        day = pd.to_numeric(frame["days since_first_visit"])
+        day = pd.to_numeric(frame['days since_first_visit'])
         # Isolate influenza `Day 0` visits because those define the pre-vaccine baselines used to identify each donor's first documented flu exposure.
-        flu = frame.loc[frame["visit"].str.match(r"Flu Year \d+ Day 0")].copy()
+        flu = frame.loc[frame['visit'].str.match(r'Flu Year \d+ Day 0')].copy()
         # Convert flu baseline timing to numeric form before taking donor-level minima.
-        flu["day"] = pd.to_numeric(flu["days since_first_visit"])
+        flu['day'] = pd.to_numeric(flu['days since_first_visit'])
         # Map each donor to their earliest influenza Day-0 visit; donors without one receive infinity so they are not falsely excluded by that comparison.
-        first_flu = frame["subject id"].map(flu.groupby("subject id")["day"].min()).fillna(np.inf)
+        first_flu = (
+            frame['subject id']
+            .map(flu.groupby('subject id')['day'].min())
+            .fillna(np.inf)
+        )
         # Parse first COVID-vaccine timing numerically; missing values remain NaN rather than being interpreted as a vaccine exposure.
-        covid = pd.to_numeric(frame["covid vax_dose_1_relative_to_first_visit_(days)"], errors="coerce")
+        covid = pd.to_numeric(
+            frame['covid vax_dose_1_relative_to_first_visit_(days)'], errors='coerce'
+        )
         # Retain unperturbed visits before the first recorded vaccination.
-        keep = frame["visit"].eq("Flu Year 1 Day 0") | (frame["visit"].str.startswith("Immune Variation") & day.lt(first_flu))
+        keep = frame['visit'].eq('Flu Year 1 Day 0') | (
+            frame['visit'].str.startswith('Immune Variation') & day.lt(first_flu)
+        )
         # Keep only unperturbed visits that occur before the donor's first documented COVID/flu vaccination, and exclude Stand-Alone records whose timing cannot be safely treated as baseline.
-        keep &= (covid.isna() | day.lt(covid)) & ~frame["title"].str.contains("Stand-Alone")
+        keep &= (covid.isna() | day.lt(covid)) & ~frame['title'].str.contains(
+            'Stand-Alone'
+        )
         # Apply the combined pre-vaccination/unperturbed mask, leaving only GSE271896 visits permitted as negative controls.
         frame = frame.loc[keep]
     # GSE275067 is filtered by Stanford subject identity rather than visit timing because its eligible healthy4 arm is one cross-sectional draw per SF donor.
-    elif accession == "GSE275067":
+    elif accession == 'GSE275067':
         # Restrict GSE275067 to biological Stanford `SF` donor records; pooled/technical records without an SF subject are not independent negative draws.
-        frame = frame.loc[frame["subject id"].str.match(r"^SF\d+$", na=False)]
+        frame = frame.loc[frame['subject id'].str.match(r'^SF\d+$', na=False)]
         # Exclude GSM8465050 because the audit identified it as the redundant/mismatched aliquot rather than an additional biological draw.
-        frame = frame.loc[frame["gsm"].ne("GSM8465050")]
+        frame = frame.loc[frame['gsm'].ne('GSM8465050')]
     # GSE214283 encodes eligibility directly as control status plus collection day, so the negative arm is the control Day-1 subset.
-    elif accession == "GSE214283":
+    elif accession == 'GSE214283':
         # Keep only healthy-control Day-1 draws from GSE214283; case samples and Day-2 follow-up draws are excluded from the negative arm.
-        frame = frame.loc[frame["disease state"].eq("control") & frame["collection day"].eq("D1")]
+        frame = frame.loc[
+            frame['disease state'].eq('control') & frame['collection day'].eq('D1')
+        ]
     # Return accession-specific audited negative records as ordinary dictionaries for file-building loops.
-    return frame.to_dict("records")
-
+    return frame.to_dict('records')
 
 
 # Build newer negative cohorts using the exact workbook-audited sample allowlists and deposited file types.
-def _build_new_gse(accession: str, raw: Path, cohort_name: str,
-                   keep_downloads: bool) -> list[tuple[str, ad.AnnData]]:
+def _build_new_gse(
+    accession: str, raw: Path, cohort_name: str, keep_downloads: bool
+) -> list[tuple[str, ad.AnnData | Path]]:
     # Parse GEO sample records once, then apply accession-specific healthy/baseline rules before downloading large files.
     records = _negative_records(accession, _soft_samples(_soft(raw, accession)))
     # Define which deposited file(s) belong to each retained negative-control record so the builder never consumes unrelated series files.
     files = {
-        r["gsm"]: [url.rsplit("/", 1)[-1] for url in r["supplementary"]
-                   if url.endswith((".h5", "_RawCounts.csv.gz", "_Individual_Barcodes.csv.gz"))]
+        r['gsm']: [
+            url.rsplit('/', 1)[-1]
+            for url in r['supplementary']
+            if url.endswith(('.h5', '_RawCounts.csv.gz', '_Individual_Barcodes.csv.gz'))
+        ]
         for r in records
     }
     # When raw downloads are not being retained, remove stale files from older attempts that are not part of the current audited required-file set.
@@ -1911,12 +2024,12 @@ def _build_new_gse(accession: str, raw: Path, cohort_name: str,
     total_inputs = sum(len(names) for names in files.values())
     # Track download position across records that contribute different numbers of source files.
     input_number = 0
-    # Build one AnnData per retained negative input while deleting source files as soon as each object is safely in memory.
-    objects = []
+    # Keep ordinary negative cohorts in memory; stage the much larger Gustafson cohort on disk one sample at a time.
+    objects, object_paths = [], []
     # Build each audited negative-control record separately so donor/draw identity stays tied to the exact GEO sample.
     for record in records:
         # Use the retained GEO sample accession as the key into the audited file mapping for this negative-control record.
-        gsm = record["gsm"]
+        gsm = record['gsm']
         # Reset the per-record local file list before downloading that GSM's exact audited components.
         paths = []
         # Download every audited component for this retained GSM before dispatching to the accession-specific parser.
@@ -1924,46 +2037,75 @@ def _build_new_gse(accession: str, raw: Path, cohort_name: str,
             # Advance the shared input counter so progress remains correct across records with different file counts.
             input_number += 1
             # Expose per-input progress because several cohorts contain dozens or hundreds of source files and would otherwise appear stalled.
-            progress(f"  Downloading input {input_number}/{total_inputs}", end="\r")
+            progress(f'  Downloading input {input_number}/{total_inputs}')
             # Preserve downloaded file order so later reader logic can pair or select inputs deterministically.
             paths.append(_sample_file(raw, gsm, filename))
         # Separate file-transfer progress from parsing progress because large inputs can spend substantial time reading after download completes.
-        progress(f"  Reading input {input_number}/{total_inputs}", end="\r")
+        progress(f'  Reading input {input_number}/{total_inputs}')
         # Use the HDF5-count path for Gustafson/Grimson negatives because their counts and sample annotations are embedded together in H5 files.
-        if accession in {"GSE271896", "GSE275067", "GSE214283"}:
+        if accession in {'GSE271896', 'GSE275067', 'GSE214283'}:
             # Parse this retained Gustafson/Grimson HDF5 with its GEO record so embedded per-cell draw IDs are reconciled to the audited biological sample.
             obj = _read_h5_counts(paths[0], record, accession)
         # Use the pooled barcode-map workflow for GSE196735 because donor identity is deposited separately from the expression matrix.
-        elif accession == "GSE196735":
+        elif accession == 'GSE196735':
             # Select the deposited barcode→individual mapping required to convert pooled cells into biological donor IDs.
-            barcode_file = next(p for p in paths if p.name.endswith("_Individual_Barcodes.csv.gz"))
+            barcode_file = next(
+                p for p in paths if p.name.endswith('_Individual_Barcodes.csv.gz')
+            )
             # Index the barcode map by cell barcode so donor labels can be aligned directly to expression columns.
-            barcode_map = pd.read_csv(barcode_file, dtype=str).set_index("Barcode")["Individual ID"]
+            barcode_map = pd.read_csv(barcode_file, dtype=str).set_index('Barcode')[
+                'Individual ID'
+            ]
             # Drop pooled barcodes without an Individual ID before reading counts; every retained GSE196735 cell must have a biological donor assignment.
             barcode_map = barcode_map.dropna()
             # Select the raw-count table paired with the individual-barcode mapping.
-            count_file = next(p for p in paths if p.name.endswith("_RawCounts.csv.gz"))
+            count_file = next(p for p in paths if p.name.endswith('_RawCounts.csv.gz'))
             # Read only barcodes present in the donor map so unmapped pooled cells do not enter the negative-control AnnData.
             obj = _read_expression_csv(count_file, set(barcode_map.index), np.int32)
             # Align donor IDs to the AnnData cell order using the barcode-indexed map.
             donors = barcode_map.loc[obj.obs_names].to_numpy()
             # Construct standardized cell/library/donor metadata from the pooled barcode mapping before replacing the reader's temporary `obs`.
-            obs = pd.DataFrame({
-                "cell_barcode": obj.obs_names, "library_id": gsm,
-                "donor_id": donors, "draw_id": donors},
-                index=pd.Index([f"{gsm}:{c}" for c in obj.obs_names], name="cell_id"))
+            obs = pd.DataFrame(
+                {
+                    'cell_barcode': obj.obs_names,
+                    'library_id': gsm,
+                    'donor_id': donors,
+                    'draw_id': donors,
+                },
+                index=pd.Index([f'{gsm}:{c}' for c in obj.obs_names], name='cell_id'),
+            )
             # Replace temporary pooled-expression metadata with the barcode-aligned donor/library table after every retained GSE196735 cell has a biological donor.
             obj.obs = obs
-        # Add the fully parsed library/sample after donor/library metadata are attached; cohort concatenation happens after all inputs are converted.
-        objects.append(obj)
+        # Write each Gustafson sample after gene standardization so its matrix can be released before the next sample is read.
+        if accession == 'GSE275067':
+            obj = standardize_genes(obj, report=False)
+            object_path = raw / f'{gsm}.h5ad'
+            obj.write_h5ad(object_path, compression='gzip', compression_opts=4)
+            object_paths.append(object_path)
+            del obj
+        else:
+            # Add smaller negative-control inputs to the ordinary in-memory concatenation path.
+            objects.append(obj)
         # Delete each negative-control input after it has been converted to AnnData, preventing raw files from accumulating across hundreds of samples.
         if not keep_downloads:
             # Delete each negative-control source file after conversion when raw downloads are not being retained.
             for path in paths:
                 # Remove this temporary/raw file after its information has been safely transferred into memory or final output.
                 path.unlink()
-    # Return the combined negative-control AnnData after all retained inputs have been parsed and reconciled.
-    return [("filtered_raw_counts", _concat(objects))]
+    # Concatenate Gustafson's standardized sample H5ADs in bounded disk-backed chunks.
+    if accession == 'GSE275067':
+        combined_path = raw / 'filtered_raw_counts.h5ad'
+        concat_on_disk(
+            object_paths,
+            combined_path,
+            join='outer',
+            merge='first',
+            fill_value=0,
+            max_loaded_elems=10_000_000,
+        )
+        return [('filtered_raw_counts', combined_path)]
+    # Return smaller negative cohorts through the existing in-memory concatenation path.
+    return [('filtered_raw_counts', _concat(objects))]
 
 
 # Slice selected cells from a backed source and replace source annotations with project donor/draw identifiers.
@@ -1974,55 +2116,66 @@ def _raw_subset(source, keep, donors, draws, library) -> ad.AnnData:
     # Copy raw feature metadata before modality filtering so the backed source object remains untouched.
     var = source.raw.var.copy()
     # Choose the first available readable gene-name column, falling back to the feature index only when necessary.
-    symbol_column = next((c for c in ['gene_symbol', 'feature_name', 'gene'] if c in var), None)
+    symbol_column = next(
+        (c for c in ['gene_symbol', 'feature_name', 'gene'] if c in var), None
+    )
     # Resolve the readable feature labels used to identify and remove non-RNA `_PROT` features.
     symbols = var[symbol_column].astype(str) if symbol_column else var.index.astype(str)
     # Drop `_PROT` ADT features so the final matrix contains RNA genes only.
-    genes = ~pd.Index(symbols).str.endswith("_PROT")
+    genes = ~pd.Index(symbols).str.endswith('_PROT')
     # Populate readable RNA feature symbols before returning the subset so the common gene-standardization step has an explicit label column.
-    var["gene_symbol"] = np.asarray(symbols)
+    var['gene_symbol'] = np.asarray(symbols)
     # Preserve the source feature index as provenance before later symbol harmonization changes the final feature index.
-    var["original_gene_id"] = var.index.astype(str)
+    var['original_gene_id'] = var.index.astype(str)
     # Preserve original source barcodes for retained positions before constructing globally unique cell IDs.
     barcodes = source.obs_names[positions].astype(str)
     # Copy source observations for the identical retained positions so counts and metadata stay row-aligned.
-    obs = pd.DataFrame({"cell_barcode": barcodes,
-                        "library_id": np.asarray(library)[positions],
-                        "donor_id": np.asarray(donors)[positions],
-                        "draw_id": np.asarray(draws)[positions]},
-                       index=_unique(barcodes, "cell_id"))
+    obs = pd.DataFrame(
+        {
+            'cell_barcode': barcodes,
+            'library_id': np.asarray(library)[positions],
+            'donor_id': np.asarray(donors)[positions],
+            'draw_id': np.asarray(draws)[positions],
+        },
+        index=_unique(barcodes, 'cell_id'),
+    )
     # Return counts and aligned metadata together as one AnnData so row/column correspondence cannot be lost.
-    return ad.AnnData(X=sparse.csr_matrix(source.raw.X[positions, :])[:, genes],
-                      obs=obs, var=var.loc[genes].copy())
+    return ad.AnnData(
+        X=sparse.csr_matrix(source.raw.X[positions, :])[:, genes],
+        obs=obs,
+        var=var.loc[genes].copy(),
+    )
 
 
 # Read the pinned CELLxGENE AIDA asset and retain only audited donor/draw rows from its raw expression matrix.
-def build_aida(raw: Path, keep_downloads: bool = False, debug: bool = False) -> ad.AnnData:
+def build_aida(
+    raw: Path, keep_downloads: bool = False, debug: bool = False
+) -> ad.AnnData:
     """Read the AIDA PBMC asset, excluding commercial LONZA controls."""
     # Pin the exact CELLxGENE H5AD asset instead of querying a mutable 'latest' dataset.
-    url = "https://datasets.cellxgene.cziscience.com/f89a12c2-7a3b-415b-ab87-bbc550fe17f4.h5ad"
+    url = 'https://datasets.cellxgene.cziscience.com/f89a12c2-7a3b-415b-ab87-bbc550fe17f4.h5ad'
     # Expose per-input progress because several cohorts contain dozens or hundreds of source files and would otherwise appear stalled.
-    progress("  Downloading input 1/1", end="\r")
+    progress('  Downloading input 1/1')
     # Download/reuse the pinned AIDA H5AD inside this cohort's workspace.
-    path = _download(url, raw / url.rsplit("/", 1)[-1])
+    path = _download(url, raw / url.rsplit('/', 1)[-1])
     # Separate file-transfer progress from parsing progress because large inputs can spend substantial time reading after download completes.
-    progress("  Reading input 1/1", end="\r")
+    progress('  Reading input 1/1')
     # Open the H5AD with its expression matrix on disk until selected rows are read.
-    source = ad.read_h5ad(path, backed="r")
+    source = ad.read_h5ad(path, backed='r')
     # Guarantee backed source handles and temporary extracted files are cleaned up even if filtering/materialization fails.
     try:
         # Read biological donor IDs from the source metadata as strings for workbook/sample matching.
-        donors = source.obs["donor_id"].astype(str)
+        donors = source.obs['donor_id'].astype(str)
         # Read source sample/draw IDs separately from donor IDs because this object can contain multiple observations per donor.
-        draws = source.obs["sample_id"].astype(str)
+        draws = source.obs['sample_id'].astype(str)
         # Restrict to audited donor/draw rows before materializing raw expression.
-        keep = ~donors.str.startswith("LONZA")
+        keep = ~donors.str.startswith('LONZA')
         # In debug mode, keep only a small number of eligible draws after applying the real inclusion mask.
         if debug:
             # Further restrict the existing eligibility mask in debug mode without changing the real inclusion criteria.
             keep &= draws.isin(draws.loc[keep].drop_duplicates().iloc[:100])
         # Return the raw-RNA subset for only the audited eligible cells/draws.
-        return _raw_subset(source, keep, donors, draws, source.obs["library_id"])
+        return _raw_subset(source, keep, donors, draws, source.obs['library_id'])
     finally:
         # Close the H5AD before deleting its source file.
         source.file.close()
@@ -2036,21 +2189,25 @@ def build_aida(raw: Path, keep_downloads: bool = False, debug: bool = False) -> 
 def build_tsang(raw: Path, keep_downloads: bool = False) -> ad.AnnData:
     """Read baseline samples from the deposited Zenodo H5AD."""
     # Pin the audited Zenodo ZIP URL so the build uses the same deposited vaccination dataset every run.
-    url = "https://zenodo.org/api/records/10546916/files/flu_single_cell_data_2023_11_05.zip/content"
+    url = 'https://zenodo.org/api/records/10546916/files/flu_single_cell_data_2023_11_05.zip/content'
     # Store the ZIP in the cohort workspace and extract only the required combined H5AD member.
-    archive = raw / url.split("/files/", 1)[1].split("/", 1)[0]
+    archive = raw / url.split('/files/', 1)[1].split('/', 1)[0]
     # Pin the exact combined CITE-seq H5AD inside the ZIP rather than relying on archive traversal order.
-    member = "flu_single_cell_data_2023_11_05/data/flu_vacc_CITEseq_combinedassay.h5ad"
+    member = 'flu_single_cell_data_2023_11_05/data/flu_vacc_CITEseq_combinedassay.h5ad'
     # Use a predictable local filename for the extracted H5AD so restart/cleanup logic is simple.
     path = raw / Path(member).name
     # Extract the pinned H5AD only when it is not already present in the temporary workspace.
     if not path.exists():
         # Expose per-input progress because several cohorts contain dozens or hundreds of source files and would otherwise appear stalled.
-        progress("  Downloading input 1/1", end="\r")
+        progress('  Downloading input 1/1')
         # Use the shared downloader so retries, cache reuse, and `.part` safety behave identically for every reference/source file.
         _download(url, archive)
         # Extract only the required H5AD member from the downloaded ZIP.
-        with zipfile.ZipFile(archive) as zipped, zipped.open(member) as src, path.open("wb") as dst:
+        with (
+            zipfile.ZipFile(archive) as zipped,
+            zipped.open(member) as src,
+            path.open('wb') as dst,
+        ):
             # Stream-copy decompressed bytes in chunks instead of reading the entire compressed H5AD into memory.
             shutil.copyfileobj(src, dst)
     # Delete input files after use when the caller has disabled keeping downloads.
@@ -2058,21 +2215,21 @@ def build_tsang(raw: Path, keep_downloads: bool = False) -> ad.AnnData:
         # Remove this temporary/raw file after its information has been safely transferred into memory or final output.
         archive.unlink(missing_ok=True)
     # Open the H5AD with its expression matrix on disk until selected rows are read.
-    progress("  Reading input 1/1", end="\r")
+    progress('  Reading input 1/1')
     # Open the extracted vaccination H5AD in backed mode so day-0 filtering is determined from metadata first.
-    source = ad.read_h5ad(path, backed="r")
+    source = ad.read_h5ad(path, backed='r')
     # Guarantee backed source handles and temporary extracted files are cleaned up even if filtering/materialization fails.
     try:
         # Read the deposited sample IDs that distinguish baseline and post-vaccine draws.
-        draws = source.obs["sample"].astype(str)
+        draws = source.obs['sample'].astype(str)
         # Remove the final timepoint suffix from draw IDs to recover biological donor identity.
-        donors = draws.str.rsplit("_", n=1).str[0]
+        donors = draws.str.rsplit('_', n=1).str[0]
         # Retain audited day-0 cells only before copying raw RNA into the result.
-        keep = source.obs["timepoint"].astype(str).eq("d0")
+        keep = source.obs['timepoint'].astype(str).eq('d0')
         # Remove author-annotated doublets from the already selected baseline cells before raw RNA extraction.
-        keep &= ~source.obs["celltype_joint"].astype(str).eq("DOUBLET")
+        keep &= ~source.obs['celltype_joint'].astype(str).eq('DOUBLET')
         # Return the raw-RNA subset for only the audited eligible cells/draws.
-        return _raw_subset(source, keep, donors, draws, source.obs["tenx_lane"])
+        return _raw_subset(source, keep, donors, draws, source.obs['tenx_lane'])
     finally:
         # Close the H5AD before deleting its source file.
         source.file.close()
